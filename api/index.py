@@ -130,6 +130,67 @@ async def change_initial_password(body: PasswordChange, request: Request, respon
     return {'ok':True, 'message':'Password changed. Please sign in with your new password.'}
 
 
+
+class PasswordResetRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+class PasswordResetComplete(BaseModel):
+    access_token: str = Field(min_length=20)
+    new_password: str = Field(min_length=12, max_length=128)
+
+@app.post('/api/auth/password-reset/request')
+async def request_password_reset(body: PasswordResetRequest):
+    # Do not reveal whether an account exists or is enabled.
+    _, url, key = settings()
+    app_url = os.environ.get('CALENDAR_PUBLIC_URL', '').strip().rstrip('/')
+    if not app_url.startswith('https://') or '/' in app_url[8:]:
+        raise HTTPException(503, 'Password reset URL is not configured')
+    redirect_url = f'{app_url}/?reset=1'
+    async with httpx.AsyncClient(timeout=12) as client:
+        try:
+            await client.post(
+                f'{url}/auth/v1/recover',
+                headers={'apikey': key, 'Content-Type': 'application/json'},
+                params={'redirect_to': redirect_url},
+                json={'email': body.email.strip().lower()},
+            )
+        except httpx.RequestError:
+            raise HTTPException(503, 'Password reset service unavailable')
+    return {'ok': True, 'message': 'If an eligible account exists, a reset link has been sent.'}
+
+@app.post('/api/auth/password-reset/complete')
+async def complete_password_reset(body: PasswordResetComplete, request: Request):
+    # Recovery access tokens are provided by Supabase only after the email link is verified.
+    _, url, key = settings()
+    expected_origin = os.environ.get('CALENDAR_PUBLIC_URL', '').strip().rstrip('/')
+    if request.headers.get('origin') != expected_origin:
+        raise HTTPException(403, 'Invalid request origin')
+    if body.new_password == 'PrepBays1':
+        raise HTTPException(422, 'Choose a different password')
+    headers = {'apikey': key, 'Authorization': f'Bearer {body.access_token}'}
+    async with httpx.AsyncClient(timeout=12) as client:
+        try:
+            verified = await client.get(f'{url}/auth/v1/user', headers=headers)
+        except httpx.RequestError:
+            raise HTTPException(503, 'Authentication service unavailable')
+        if verified.status_code != 200:
+            raise HTTPException(401, 'Reset link is invalid or expired')
+        try:
+            uid = UUID(verified.json()['id'])
+        except (ValueError, KeyError, TypeError):
+            raise HTTPException(401, 'Invalid reset session')
+        row = await query('select enabled from public.calendar_users where user_id=$1', uid, one=True)
+        if not row or not row['enabled']:
+            raise HTTPException(403, 'Account not enabled')
+        try:
+            updated = await client.put(f'{url}/auth/v1/user', headers=headers, json={'password': body.new_password})
+        except httpx.RequestError:
+            raise HTTPException(503, 'Authentication service unavailable')
+        if updated.status_code not in (200, 204):
+            raise HTTPException(400, 'Password could not be updated. Request a fresh link.')
+    await query('update public.calendar_users set must_change_password=false where user_id=$1', uid, execute=True)
+    return {'ok': True}
+
 # Group identity is stable even when a WinHits number is corrected.
 # Existing records are linked by the data-preserving migration.
 async def attach_job_group(conn, job_id:UUID, winhits:str):

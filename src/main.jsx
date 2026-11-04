@@ -15,7 +15,63 @@ import './index.css';
 document.documentElement.lang = 'en-GB';
 document.documentElement.classList.add('dark');
 document.documentElement.style.colorScheme = 'dark';
-function Login(){const {login}=useAuth();const [email,setEmail]=useState(''),[password,setPassword]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState('');async function submit(e){e.preventDefault();setBusy(true);setError('');try{await login(email,password)}catch(err){setError(err.response?.data?.detail||'Unable to sign in')}finally{setBusy(false)}}return <main className="min-h-screen flex items-center justify-center bg-background p-4"><form onSubmit={submit} className="w-full max-w-md rounded-xl bg-card border border-border p-8 space-y-5 shadow-xl"><div className="text-xs font-bold tracking-[.3em] text-[#D11047]">PRG UK</div><h1 className="text-3xl font-black">Prep Bay Calendar</h1><p className="text-muted-foreground text-sm">Sign in with your dedicated calendar account.</p><label className="block text-sm">Email<input className="block w-full mt-2 p-3 rounded bg-secondary border border-border" type="email" autoComplete="username" required value={email} onChange={e=>setEmail(e.target.value)}/></label><label className="block text-sm">Password<input className="block w-full mt-2 p-3 rounded bg-secondary border border-border" type="password" autoComplete="current-password" required value={password} onChange={e=>setPassword(e.target.value)}/></label>{error&&<p role="alert" className="text-red-400 text-sm">{error}</p>}<button disabled={busy} className="w-full bg-[#D11047] text-white font-bold rounded p-3 disabled:opacity-50">{busy?'Signing in…':'Sign in'}</button></form></main>}
+
+function ForgotPassword({onBack}){
+ const [email,setEmail]=useState(''),[busy,setBusy]=useState(false),[sent,setSent]=useState(false),[error,setError]=useState('');
+ async function submit(e){
+  e.preventDefault();setBusy(true);setError('');
+  try{await api.post('/auth/password-reset/request',{email});setSent(true)}
+  catch(err){setError(err.response?.data?.detail||'Unable to send reset email. Please try again.')}
+  finally{setBusy(false)}
+ }
+ return <main className="min-h-screen flex items-center justify-center bg-background p-4"><div className="w-full max-w-md rounded-xl bg-card border border-border p-6 sm:p-8 space-y-5">
+  <div className="text-xs font-bold tracking-[.3em] text-[#D11047]">PRG UK</div>
+  <h1 className="text-2xl font-black">Reset your password</h1>
+  {sent?<p role="status" className="text-sm">If this email belongs to an active calendar account, a password reset link has been sent. Check your inbox and spam folder.</p>
+  :<form onSubmit={submit} className="space-y-4">
+   <p className="text-sm text-muted-foreground">Enter the email address for your Prep Bay Calendar account.</p>
+   <label className="block text-sm">Email address<input type="email" autoComplete="email" required value={email} onChange={e=>setEmail(e.target.value)} className="block w-full mt-2 p-3 rounded bg-secondary border border-border"/></label>
+   {error&&<p role="alert" className="text-red-400 text-sm">{error}</p>}
+   <button disabled={busy} className="w-full bg-[#D11047] text-white font-bold rounded p-3 disabled:opacity-50">{busy?'Sending…':'Send reset link'}</button>
+  </form>}
+  <button type="button" onClick={onBack} className="text-sm underline">Back to sign in</button>
+ </div></main>;
+}
+function ResetPassword({onDone}){
+ const [password,setPassword]=useState(''),[confirm,setConfirm]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState(''),[success,setSuccess]=useState(false);
+ // Supabase recovery links return a short-lived access token in the URL fragment.
+ const tokenRef=React.useRef(null);
+ React.useEffect(()=>{
+  const fragment=new URLSearchParams(window.location.hash.replace(/^#/,''));
+  if(fragment.get('type')==='recovery'&&fragment.get('access_token'))tokenRef.current=fragment.get('access_token');
+  // Remove sensitive tokens from browser history as soon as captured.
+  window.history.replaceState(null,'',window.location.pathname+'?reset=1');
+ },[]);
+ async function submit(e){
+  e.preventDefault();setError('');
+  if(password.length<12){setError('Use at least 12 characters.');return}
+  if(password!==confirm){setError('Passwords do not match.');return}
+  if(!tokenRef.current){setError('This reset link is invalid or expired. Request a new link.');return}
+  setBusy(true);
+  try{
+   await api.post('/auth/password-reset/complete',{access_token:tokenRef.current,new_password:password});
+   tokenRef.current=null;setPassword('');setConfirm('');setSuccess(true);
+  }catch(err){setError(err.response?.data?.detail||'Unable to reset password. Request a new link.')}
+  finally{setBusy(false)}
+ }
+ return <main className="min-h-screen flex items-center justify-center bg-background p-4"><div className="w-full max-w-md rounded-xl bg-card border border-border p-6 sm:p-8 space-y-5">
+  <div className="text-xs font-bold tracking-[.3em] text-[#D11047]">PRG UK</div><h1 className="text-2xl font-black">Choose a new password</h1>
+  {success?<p role="status">Your password has been updated. You can now sign in with your new password.</p>:<form onSubmit={submit} className="space-y-4">
+   <label className="block text-sm">New password<input type="password" autoComplete="new-password" minLength={12} required value={password} onChange={e=>setPassword(e.target.value)} className="block w-full mt-2 p-3 rounded bg-secondary border border-border"/></label>
+   <label className="block text-sm">Confirm new password<input type="password" autoComplete="new-password" minLength={12} required value={confirm} onChange={e=>setConfirm(e.target.value)} className="block w-full mt-2 p-3 rounded bg-secondary border border-border"/></label>
+   {error&&<p role="alert" className="text-red-400 text-sm">{error}</p>}
+   <button disabled={busy} className="w-full bg-[#D11047] text-white font-bold rounded p-3 disabled:opacity-50">{busy?'Updating…':'Set new password'}</button>
+  </form>}
+  <button type="button" onClick={onDone} className="text-sm underline">Return to sign in</button>
+ </div></main>;
+}
+
+function Login(){const {login}=useAuth();const [forgot,setForgot]=useState(false);const [email,setEmail]=useState(''),[password,setPassword]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState('');async function submit(e){e.preventDefault();setBusy(true);setError('');try{await login(email,password)}catch(err){setError(err.response?.data?.detail||'Unable to sign in')}finally{setBusy(false)}}if(forgot)return <ForgotPassword onBack={()=>setForgot(false)}/>;return <main className="min-h-screen flex items-center justify-center bg-background p-4"><form onSubmit={submit} className="w-full max-w-md rounded-xl bg-card border border-border p-8 space-y-5 shadow-xl"><div className="text-xs font-bold tracking-[.3em] text-[#D11047]">PRG UK</div><h1 className="text-3xl font-black">Prep Bay Calendar</h1><p className="text-muted-foreground text-sm">Sign in with your dedicated calendar account.</p><label className="block text-sm">Email<input className="block w-full mt-2 p-3 rounded bg-secondary border border-border" type="email" autoComplete="username" required value={email} onChange={e=>setEmail(e.target.value)}/></label><label className="block text-sm">Password<input className="block w-full mt-2 p-3 rounded bg-secondary border border-border" type="password" autoComplete="current-password" required value={password} onChange={e=>setPassword(e.target.value)}/></label>{error&&<p role="alert" className="text-red-400 text-sm">{error}</p>}<button disabled={busy} className="w-full bg-[#D11047] text-white font-bold rounded p-3 disabled:opacity-50">{busy?'Signing in…':'Sign in'}</button><button type="button" onClick={()=>setForgot(true)} className="block mx-auto text-sm underline">Forgot password?</button></form></main>}
 function InitialPasswordChange(){
  const {resetSession}=useAuth();
  const [password,setPassword]=useState(''),[confirm,setConfirm]=useState('');
@@ -34,11 +90,13 @@ function InitialPasswordChange(){
 
 function App(){
  const {user,loading,logout}=useAuth();
+ const [resetMode,setResetMode]=useState(new URLSearchParams(window.location.search).get('reset')==='1');
  const [path,setPath]=useState(window.location.hash || '#/');
  const [menuOpen,setMenuOpen]=useState(false);
  React.useEffect(()=>{const sync=()=>{setPath(window.location.hash||'#/');setMenuOpen(false)};window.addEventListener('hashchange',sync);window.addEventListener('popstate',sync);return()=>{window.removeEventListener('hashchange',sync);window.removeEventListener('popstate',sync)}},[]);
  React.useEffect(()=>{if(!menuOpen)return;const onKey=e=>{if(e.key==='Escape')setMenuOpen(false)};window.addEventListener('keydown',onKey);return()=>window.removeEventListener('keydown',onKey)},[menuOpen]);
  const navigate=(url)=>{if(window.location.hash!==url)window.location.hash=url;setPath(url);setMenuOpen(false);window.scrollTo({top:0,behavior:'instant'});};
+ if(resetMode)return <ResetPassword onDone={()=>{window.history.replaceState(null,'',window.location.pathname);setResetMode(false)}}/>;
  if(loading)return <div className="p-8">Loading…</div>;
  if(!user)return <Login/>;
  if(user.must_change_password)return <InitialPasswordChange/>;
