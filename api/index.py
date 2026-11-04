@@ -40,11 +40,17 @@ async def auth_user(request: Request):
         except httpx.RequestError: raise HTTPException(503, 'Authentication service unavailable')
     if r.status_code != 200: raise HTTPException(401, 'Session expired — please sign in again')
     uid = UUID(r.json()['id'])
-    row = await query('select role from public.calendar_users where user_id=$1 and enabled=true', uid, one=True)
+    row = await query('select role, must_change_password from public.calendar_users where user_id=$1 and enabled=true', uid, one=True)
     if not row: raise HTTPException(403, 'This account does not have calendar access')
-    return {'id': uid, 'email': r.json().get('email'), 'role': row['role']}
+    return {'id': uid, 'email': r.json().get('email'), 'role': row['role'], 'must_change_password': row['must_change_password']}
 
-async def editor(user=Depends(auth_user)):
+async def calendar_user(user=Depends(auth_user)):
+    if user['must_change_password']:
+        raise HTTPException(403, 'You must change your initial password first')
+    return user
+
+async def editor(user=Depends(calendar_user)):
+    if user['must_change_password']: raise HTTPException(403, 'You must change your initial password first')
     if user['role'] not in ('editor', 'admin'): raise HTTPException(403, 'Editor access required')
     return user
 
@@ -57,22 +63,42 @@ async def login(body: Login, response: Response):
     if r.status_code != 200: raise HTTPException(401, 'Invalid email or password')
     result = r.json()
     uid = UUID(result['user']['id'])
-    row = await query('select role from public.calendar_users where user_id=$1 and enabled=true', uid, one=True)
+    row = await query('select role, must_change_password from public.calendar_users where user_id=$1 and enabled=true', uid, one=True)
     if not row: raise HTTPException(403, 'This account is not authorised for the calendar')
     response.set_cookie('calendar_access', result['access_token'], httponly=True, secure=True, samesite='lax', max_age=result.get('expires_in',3600), path='/api')
-    return {'email':result['user']['email'], 'role':row['role']}
+    return {'email':result['user']['email'], 'role':row['role'], 'must_change_password':row['must_change_password']}
 
 @app.get('/api/auth/me')
 async def me(user=Depends(auth_user)):
-    return {'email':user['email'],'role':user['role']}
+    return {'email':user['email'],'role':user['role'], 'must_change_password':user['must_change_password']}
 
 @app.post('/api/auth/logout')
 async def logout(response: Response):
     response.delete_cookie('calendar_access', path='/api', secure=True, httponly=True, samesite='lax')
     return {'ok':True}
 
+class PasswordChange(BaseModel):
+    new_password: str = Field(min_length=12, max_length=128)
+
+@app.post('/api/auth/change-initial-password')
+async def change_initial_password(body: PasswordChange, request: Request, response: Response, user=Depends(auth_user)):
+    # This endpoint is only for mandatory first-login password changes.
+    if not user['must_change_password']:
+        raise HTTPException(409, 'Initial password change is not required')
+    # Cookie-authenticated mutation: reject cross-origin requests.
+    origin = request.headers.get('origin')
+    if not origin or origin != f"https://{request.headers.get('host', '')}":
+        raise HTTPException(403, 'Invalid request origin')
+    # Do not use the shared initial password or any password shorter than 12 characters.
+    if body.new_password == 'PrepBays1':
+        raise HTTPException(422, 'Choose a different password')
+    await supabase_admin('PUT', f"users/{user['id']}", {'password':body.new_password})
+    await query('update public.calendar_users set must_change_password=false where user_id=$1', user['id'], execute=True)
+    response.delete_cookie('calendar_access', path='/api', secure=True, httponly=True, samesite='lax')
+    return {'ok':True, 'message':'Password changed. Please sign in with your new password.'}
+
 @app.get('/api/jobs')
-async def jobs(user=Depends(auth_user)):
+async def jobs(user=Depends(calendar_user)):
     rows = await query('select id,name,winhits_number,prep_date,ship_date,prep_bays from public.calendar_jobs order by prep_date desc nulls last limit 2000')
     ids=[r['id'] for r in rows]
     depts=await query('select job_id,bay,department from public.calendar_job_bay_assignments where job_id=any($1::uuid[])',ids) if ids else []
@@ -101,7 +127,7 @@ async def delete_job(job_id:UUID,user=Depends(editor)):
     return {'ok':True}
 
 @app.get('/api/prep-bays/bookings')
-async def bookings(year:int,month:int,user=Depends(auth_user)):
+async def bookings(year:int,month:int,user=Depends(calendar_user)):
     if not 2000 <= year <= 2100 or not 1 <= month <= 12: raise HTTPException(400,'Invalid month')
     start=date(year,month,1)
     end=date(year+1,1,1) if month==12 else date(year,month+1,1)
@@ -124,7 +150,7 @@ async def conflicts(start:date,end:date,bays:list[str],exclude_job:Optional[UUID
     return found
 
 @app.get('/api/prep-bays/availability')
-async def availability(prep_date:date,ship_date:date,exclude_job_id:Optional[UUID]=None,exclude_manual_id:Optional[UUID]=None,user=Depends(auth_user)):
+async def availability(prep_date:date,ship_date:date,exclude_job_id:Optional[UUID]=None,exclude_manual_id:Optional[UUID]=None,user=Depends(calendar_user)):
     found=await conflicts(prep_date,ship_date,BAYS,exclude_job_id,exclude_manual_id)
     return [{'bay':b,'available':not found[b],'conflicts':found[b]} for b in BAYS]
 
@@ -210,7 +236,7 @@ class UserUpdate(BaseModel):
     role: str
     enabled: bool = True
 
-async def admin(user=Depends(auth_user)):
+async def admin(user=Depends(calendar_user)):
     if user['role'] != 'admin':
         raise HTTPException(403, 'Administrator access required')
     return user
@@ -255,7 +281,7 @@ async def create_calendar_user(body:UserCreate, user=Depends(admin)):
     created = await supabase_admin('POST', 'users', {'email':email, 'password':body.password, 'email_confirm':True})
     uid = UUID(created['id'])
     try:
-        await query('insert into public.calendar_users(user_id,role,enabled) values($1,$2,true)',uid,body.role,execute=True)
+        await query('insert into public.calendar_users(user_id,role,enabled,must_change_password) values($1,$2,true,true)',uid,body.role,execute=True)
     except Exception:
         await supabase_admin('DELETE',f'users/{uid}')
         raise HTTPException(500,'Unable to save calendar permissions; user creation rolled back')
