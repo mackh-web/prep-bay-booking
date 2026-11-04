@@ -440,3 +440,25 @@ async def delete_calendar_user(target:UUID,user=Depends(admin)):
     # Delete the Supabase Auth identity. The FK cascade deletes calendar_users.
     await supabase_admin('DELETE',f'users/{target}')
     return {'ok':True}
+
+
+@app.delete('/api/admin/jobs/{job_id}')
+async def delete_calendar_job(job_id: UUID, user=Depends(admin)):
+    """Permanently remove a job and free its bays; retain approval history."""
+    conn = await db()
+    try:
+        async with conn.transaction():
+            # Share the booking mutation lock to serialize deletion with approvals.
+            await conn.execute('select pg_advisory_xact_lock(4172314)')
+            job = await conn.fetchrow(
+                'select id, name, winhits_number from public.calendar_jobs where id=$1 for update',
+                job_id,
+            )
+            if not job:
+                raise HTTPException(404, 'Job not found')
+            # The existing FK sets request.job_id to NULL, retaining request history.
+            # Bay assignments cascade on job deletion.
+            await conn.execute('delete from public.calendar_jobs where id=$1', job_id)
+    finally:
+        await conn.close()
+    return {'ok': True, 'deleted_job_id': str(job_id)}

@@ -151,6 +151,20 @@ export default function PrepBayCalendar() {
 
   const todayIso = today.toISOString().slice(0, 10);
 
+  const deleteJob = async (job) => {
+    if (user?.role !== "admin") return;
+    const label = `${job.job_name} (${job.winhits_number || "No WinHits number"})`;
+    if (!window.confirm(`Permanently delete job ${label}?\n\nIts prep bay allocations will be released. This cannot be undone.`)) return;
+    try {
+      await api.delete(`/admin/jobs/${job.job_id}`);
+      toast.success(`Job deleted: ${job.job_name}`);
+      load();
+      refreshNotifications();
+    } catch (e) {
+      toast.error(formatErr(e?.response?.data?.detail) || "Unable to delete job");
+    }
+  };
+
   const deleteManualBooking = async (id) => {
     if (!canBookBays) return;
     if (!window.confirm("Remove this manual booking?")) return;
@@ -324,6 +338,7 @@ export default function PrepBayCalendar() {
                     <span className="font-semibold">{b.job_name}</span>
                     <span className="text-muted-foreground font-mono text-[10px]">{b.prep_date} → {b.ship_date}</span>
                     {canManageDirect && <button className="text-prg-red underline" onClick={() => { setEditJob({...b, id:b.job_id,name:b.job_name}); setShowBooking(true); }}>Edit</button>}
+                    {user?.role === "admin" && <button type="button" className="text-red-400 underline" aria-label={`Delete job ${b.job_name}`} onClick={() => deleteJob(b)}>Delete</button>}
                   </div>
                 ))}
               </div>
