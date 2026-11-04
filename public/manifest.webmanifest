@@ -1,1 +1,12 @@
-{"name":"PRG Prep Bay Calendar","short_name":"Prep Bays","start_url":"/","display":"standalone","background_color":"#262626","theme_color":"#D11047","icons":[{"src":"/prg-logo-192.png","sizes":"192x192","type":"image/png"},{"src":"/prg-logo-512.png","sizes":"512x512","type":"image/png"}]}
+{
+  "name": "PRG UK Prep Bay Allocation",
+  "short_name": "Prep Bays",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#383838",
+  "theme_color": "#383838",
+  "icons": [
+    {"src": "/prg-prep-bay-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+    {"src": "/prg-prep-bay-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}
