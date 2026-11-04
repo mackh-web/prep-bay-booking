@@ -18,6 +18,29 @@ const PREP_BAYS = [
 const BAY_DEPARTMENTS = ["Lighting", "Video", "Rigging", "Automation"];
 
 // Stable fallback avoids recreating empty arrays on each render.
+// Cache only monthly calendar reads. Mutations invalidate the cache immediately.
+const MONTH_CACHE_TTL_MS = 20_000;
+const monthCache = new Map();
+const monthInFlight = new Map();
+const monthKey = (year, month) => `${year}-${month}`;
+
+async function getMonth(year, month, force = false) {
+  const key = monthKey(year, month);
+  if (force) monthCache.delete(key);
+  const cached = monthCache.get(key);
+  if (cached && Date.now() - cached.time < MONTH_CACHE_TTL_MS) return cached.data;
+  if (monthInFlight.has(key)) return monthInFlight.get(key);
+  const pending = api.get('/prep-bays/bookings', { params: { year, month } })
+    .then(response => {
+      monthCache.set(key, { time: Date.now(), data: response.data });
+      // Bound memory on long-running sessions.
+      if (monthCache.size > 12) monthCache.delete(monthCache.keys().next().value);
+      return response.data;
+    }).finally(() => monthInFlight.delete(key));
+  monthInFlight.set(key, pending);
+  return pending;
+}
+function invalidateMonths() { monthCache.clear(); }
 const EMPTY_ARRAY = [];
 
 // Colour by department, not by individual job — every bay booked for the
@@ -64,10 +87,11 @@ export default function PrepBayCalendar() {
   const days = Array.from({ length: daysCount }, (_, i) => i + 1);
 
   const load = async () => {
+    invalidateMonths();
     setErr("");
     try {
-      const { data } = await api.get("/prep-bays/bookings", { params: { year, month: monthIndex + 1 } });
-      setData(data);
+      const result = await getMonth(year, monthIndex + 1, true);
+      setData(result);
     } catch (e) {
       setErr(formatErr(e?.response?.data?.detail) || e.message);
     }
@@ -75,15 +99,14 @@ export default function PrepBayCalendar() {
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      setErr("");
-      try {
-        const { data } = await api.get("/prep-bays/bookings", { params: { year, month: monthIndex + 1 } });
-        if (!cancelled) setData(data);
-      } catch (e) {
-        if (!cancelled) setErr(formatErr(e?.response?.data?.detail) || e.message);
-      }
-    })();
+    setErr("");
+    // Display a recently visited month instantly, while preserving short TTL.
+    const cached = monthCache.get(monthKey(year, monthIndex + 1));
+    if (cached && Date.now() - cached.time < MONTH_CACHE_TTL_MS) setData(cached.data);
+    else setData(null);
+    getMonth(year, monthIndex + 1)
+      .then(result => { if (!cancelled) setData(result); })
+      .catch(e => { if (!cancelled) setErr(formatErr(e?.response?.data?.detail) || e.message); });
     return () => { cancelled = true; };
   }, [year, monthIndex]);
 

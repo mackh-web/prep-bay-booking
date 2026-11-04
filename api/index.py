@@ -1,5 +1,6 @@
 """Dedicated calendar API. No Job Portal profile or role is required."""
 import os
+import asyncio
 import json
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -16,9 +17,39 @@ DEPTS = {"Lighting", "Video", "Rigging", "Automation"}
 def settings():
     return os.environ["DATABASE_URL"], os.environ["SUPABASE_URL"].rstrip('/'), os.environ["SUPABASE_PUBLISHABLE_KEY"]
 
+# A small pool is reused by requests handled by the same warm Vercel instance.
+# min_size=0 avoids opening idle database connections on cold starts.
+_pool = None
+_pool_lock = asyncio.Lock()
+
+class _LeasedConnection:
+    def __init__(self, pool, connection):
+        self._pool = pool
+        self._connection = connection
+        self._released = False
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    async def close(self):
+        if not self._released:
+            self._released = True
+            await self._pool.release(self._connection)
+
 async def db():
-    url, _, _ = settings()
-    return await asyncpg.connect(url, timeout=10, statement_cache_size=0)
+    global _pool
+    if _pool is None or _pool.is_closing():
+        async with _pool_lock:
+            if _pool is None or _pool.is_closing():
+                url, _, _ = settings()
+                _pool = await asyncpg.create_pool(
+                    dsn=url, min_size=0, max_size=3,
+                    timeout=10, command_timeout=15,
+                    statement_cache_size=0,
+                    max_inactive_connection_lifetime=60,
+                )
+    conn = await _pool.acquire(timeout=10)
+    return _LeasedConnection(_pool, conn)
 
 async def query(sql, *args, one=False, execute=False):
     conn = await db()
@@ -113,13 +144,16 @@ async def bookings(year:int,month:int,user=Depends(calendar_user)):
     if not 2000 <= year <= 2100 or not 1 <= month <= 12: raise HTTPException(400,'Invalid month')
     start=date(year,month,1)
     end=date(year+1,1,1) if month==12 else date(year,month+1,1)
-    rows=await query("select id,name,winhits_number,prep_date,ship_date,status,prep_bays from public.calendar_jobs where prep_bays != '{}' and prep_date < $2 and ship_date >= $1",start,end)
-    ids=[r['id'] for r in rows]
-    depts=await query('select job_id,bay,department from public.calendar_job_bay_assignments where job_id=any($1::uuid[])',ids) if ids else []
-    mapping={}
-    for d in depts: mapping.setdefault(d['job_id'],{})[d['bay']]=d['department']
+    rows=await query("""
+        select j.id,j.name,j.winhits_number,j.prep_date,j.ship_date,j.status,j.prep_bays,
+               coalesce((select jsonb_object_agg(a.bay,a.department)
+                         from public.calendar_job_bay_assignments a
+                         where a.job_id=j.id), '{}'::jsonb) as bay_departments
+        from public.calendar_jobs j
+        where j.prep_bays != '{}' and j.prep_date < $2 and j.ship_date >= $1
+    """,start,end)
     manual=await query('select id,bay,label,department,start_date,end_date,created_by_name from public.calendar_manual_bookings where start_date < $2 and end_date >= $1',start,end)
-    return {'bays':BAYS,'month_start':start.isoformat(),'month_end_next':end.isoformat(), 'bookings':[{'job_id':str(r['id']),'job_name':r['name'],'winhits_number':r['winhits_number'],'prep_date':r['prep_date'].isoformat(),'ship_date':r['ship_date'].isoformat(),'status':r['status'],'prep_bays':r['prep_bays'] or [],'bay_departments':mapping.get(r['id'],{})} for r in rows], 'manual_bookings':[{**dict(m),'id':str(m['id']),'start_date':m['start_date'].isoformat(),'end_date':m['end_date'].isoformat()} for m in manual]}
+    return {'bays':BAYS,'month_start':start.isoformat(),'month_end_next':end.isoformat(), 'bookings':[{'job_id':str(r['id']),'job_name':r['name'],'winhits_number':r['winhits_number'],'prep_date':r['prep_date'].isoformat(),'ship_date':r['ship_date'].isoformat(),'status':r['status'],'prep_bays':r['prep_bays'] or [],'bay_departments':json.loads(r['bay_departments']) if isinstance(r['bay_departments'],str) else r['bay_departments']} for r in rows], 'manual_bookings':[{**dict(m),'id':str(m['id']),'start_date':m['start_date'].isoformat(),'end_date':m['end_date'].isoformat()} for m in manual]}
 
 async def conflicts(start:date,end:date,bays:list[str],exclude_job:Optional[UUID]=None,exclude_manual:Optional[UUID]=None,conn=None):
     jobs=await (conn.fetch if conn else query)("select id,name,prep_bays from public.calendar_jobs where prep_date <= $2 and ship_date >= $1 and ($3::uuid is null or id<>$3) and prep_bays && $4::text[]",start,end,exclude_job,bays)
