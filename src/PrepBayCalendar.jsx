@@ -183,7 +183,7 @@ export default function PrepBayCalendar({onOpenJob = (id) => { window.location.h
   const todayIso = today.toISOString().slice(0, 10);
 
   const deleteManualBooking = async (id) => {
-    if (!canBookBays) return;
+    if (!canManageDirect) return;
     if (!window.confirm("Remove this manual booking?")) return;
     try {
       await api.delete(`/prep-bays/manual-booking/${id}`);
@@ -289,7 +289,7 @@ export default function PrepBayCalendar({onOpenJob = (id) => { window.location.h
                     ) : (
                       <div key={b.key} data-testid={`calendar-bar-${b.key}`} className={className} style={style} title={b.title}>
                         <span className="truncate flex-1">{b.label}</span>
-                        {canBookBays && (
+                        {canManageDirect && (
                           <span className="flex items-center gap-1 shrink-0 ml-1">
                             <button
                               data-testid={`calendar-bar-edit-${b.id}`}
@@ -388,14 +388,14 @@ export default function PrepBayCalendar({onOpenJob = (id) => { window.location.h
 
       {showRequests && !canManageDirect && <RequestsPanel onClose={() => setShowRequests(false)} onRefresh={() => { load(); refreshNotifications(); }} onEdit={(r) => { setEditJob(r); setShowRequests(false); setShowBooking(true); }} />}
       {/* Notifications are shown in the header bell; avoid a duplicate floating overlay on mobile. */}
-      {showManual && (
+      {showManual && canManageDirect && (
         <ManualBookingModal
           onClose={() => setShowManual(false)}
           onSaved={() => { setShowManual(false); load(); }}
         />
       )}
 
-      {editingBooking && (
+      {editingBooking && canManageDirect && (
         <ManualBookingModal
           editing={editingBooking}
           onClose={() => setEditingBooking(null)}
