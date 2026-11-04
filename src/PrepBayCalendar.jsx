@@ -6,6 +6,13 @@ import { useAuth } from "./AuthContext";
 import { CaretLeft, CaretRight, CalendarBlank, Plus, X, Wrench, PencilSimple, Trash } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
+// Format API ISO dates without timezone conversion (UK day/month/year).
+const ukDate = (value) => {
+  if (!value) return '—';
+  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : String(value);
+};
+
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
 const PREP_BAYS = [
@@ -155,7 +162,7 @@ export default function PrepBayCalendar({onOpenJob = (id) => { window.location.h
           kind: "job", key: `job-${b.job_id}-${bay}`, ...clip,
           colour: deptColour(department), department,
           label: b.job_name, jobId: b.job_id,
-          title: `${b.job_name} · ${b.prep_date} → ${b.ship_date}${department ? ` · ${department}` : ""}`,
+          title: `${b.job_name} · ${ukDate(b.prep_date)} → ${ukDate(b.ship_date)}${department ? ` · ${department}` : ""}`,
         });
       }
     }
@@ -167,27 +174,13 @@ export default function PrepBayCalendar({onOpenJob = (id) => { window.location.h
         kind: "manual", key: `manual-${m.id}`, ...clip,
         colour: deptColour(m.department), department: m.department,
         label: m.label, id: m.id, bay: m.bay, start_date: m.start_date, end_date: m.end_date,
-        title: `${m.label} (manual) · ${m.start_date} → ${m.end_date}${m.department ? ` · ${m.department}` : ""}${m.created_by_name ? ` · by ${m.created_by_name}` : ""}`,
+        title: `${m.label} (manual) · ${ukDate(m.start_date)} → ${ukDate(m.end_date)}${m.department ? ` · ${m.department}` : ""}${m.created_by_name ? ` · by ${m.created_by_name}` : ""}`,
       });
     }
     return map;
   }, [bays, bookings, manualBookings, clipToMonth]);
 
   const todayIso = today.toISOString().slice(0, 10);
-
-  const deleteJob = async (job) => {
-    if (user?.role !== "admin") return;
-    const label = `${job.job_name} (${job.winhits_number || "No WinHits number"})`;
-    if (!window.confirm(`Permanently delete job ${label}?\n\nIts prep bay allocations will be released. This cannot be undone.`)) return;
-    try {
-      await api.delete(`/admin/jobs/${job.job_id}`);
-      toast.success(`Job deleted: ${job.job_name}`);
-      load();
-      refreshNotifications();
-    } catch (e) {
-      toast.error(formatErr(e?.response?.data?.detail) || "Unable to delete job");
-    }
-  };
 
   const deleteManualBooking = async (id) => {
     if (!canBookBays) return;
@@ -356,15 +349,28 @@ export default function PrepBayCalendar({onOpenJob = (id) => { window.location.h
             <div>
               <div className="text-[10px] uppercase tracking-[0.3em] text-muted-foreground mb-2">Jobs this month</div>
               <div className="flex flex-wrap gap-2">
-                {[...new Map(bookings.map((b) => [b.job_id, b])).values()].map((b) => (
-                  <div key={b.job_id} data-testid={`calendar-legend-${b.job_id}`}
-                    className="inline-flex items-center gap-2 text-xs bg-secondary border border-border rounded-btn px-2.5 h-8 hover:border-prg-red transition-colors">
-                    <button type="button" className="font-semibold hover:underline text-left" onClick={() => onOpenJob(b.job_id)}>{b.job_name}</button>
-                    <span className="text-muted-foreground font-mono text-[10px]">{b.prep_date} → {b.ship_date}</span>
-                    <button className="text-prg-red underline" onClick={() => onOpenJob(b.job_id)}>Details</button>
-                    {user?.role === "admin" && <button type="button" className="text-red-400 underline" aria-label={`Delete job ${b.job_name}`} onClick={() => deleteJob(b)}>Delete</button>}
-                  </div>
-                ))}
+                {Array.from(bookings.reduce((groups, b) => {
+                  // WinHits is the shared job reference; keep unnumbered records separate.
+                  const number = String(b.winhits_number || '').trim().toLowerCase();
+                  const key = number ? `winhits:${number}` : `booking:${b.job_id}`;
+                  const current = groups.get(key);
+                  if (!current) groups.set(key, { ...b, firstPrep: b.group_first_prep || b.prep_date, lastShip: b.group_last_ship || b.ship_date });
+                  else {
+                    if ((b.group_first_prep || b.prep_date) < current.firstPrep) current.firstPrep = b.group_first_prep || b.prep_date;
+                    if ((b.group_last_ship || b.ship_date) > current.lastShip) current.lastShip = b.group_last_ship || b.ship_date;
+                  }
+                  return groups;
+                }, new Map()).values())
+                  .sort((a, b) => a.firstPrep.localeCompare(b.firstPrep))
+                  .map((b) => (
+                    <button type="button" key={b.winhits_number?.trim().toLowerCase() || b.job_id}
+                      data-testid={`calendar-legend-${b.job_id}`}
+                      className="inline-flex flex-wrap items-center gap-2 text-left text-xs bg-secondary border border-border rounded-btn px-3 py-2 min-h-9 hover:border-prg-red focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#D11047] transition-colors"
+                      onClick={() => onOpenJob(b.job_id)} aria-label={`Open ${b.job_name} job details`}>
+                      <span className="font-semibold">{b.job_name}</span>
+                      <span className="text-muted-foreground font-mono text-[11px]">{ukDate(b.firstPrep)} → {ukDate(b.lastShip)}</span>
+                    </button>
+                  ))}
               </div>
             </div>
           )}
@@ -458,8 +464,8 @@ function BookBaysModal({onClose,onSaved,editing}) {
     <div className="grid sm:grid-cols-2 gap-3">
       <label className="text-sm">Job name<input required maxLength={200} value={name} onChange={e=>setName(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded"/></label>
       <label className="text-sm">WinHits number<input required maxLength={100} value={winhits} onChange={e=>setWinhits(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded"/></label>
-      <label className="text-sm">Prep date<input required type="date" value={prep} onChange={e=>setPrep(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded"/></label>
-      <label className="text-sm">Ship date<input required type="date" min={prep} value={ship} onChange={e=>setShip(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded"/></label>
+      <label className="text-sm">Prep date<input required type="date" lang="en-GB" value={prep} onChange={e=>setPrep(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded"/></label>
+      <label className="text-sm">Ship date<input required type="date" lang="en-GB" min={prep} value={ship} onChange={e=>setShip(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded"/></label>
     </div>
     <label className="block text-sm">Notes / bay justification (optional)<textarea maxLength={3000} rows={3} value={notes} onChange={e=>setNotes(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded" placeholder="Why are these particular bays required?"/></label>
     <div className="font-semibold text-sm">Select prep bays</div>
@@ -490,7 +496,7 @@ function RequestsPanel({onClose,onRefresh,onEdit}){
     setBusy(true);setError('');try{await api.post(`/prep-bays/requests/${r.id}/decision`,{decision,rejection_reason});toast.success(`Request ${decision}`);await load();onRefresh()}catch(e){setError(formatErr(e?.response?.data?.detail)||e.message)}finally{setBusy(false)}}
   return <div className="fixed inset-0 z-50 bg-black/80 overflow-y-auto p-4"><div className="max-w-3xl mx-auto bg-card border border-border rounded-xl p-4 sm:p-6 space-y-4"><div className="flex justify-between"><h2 className="text-xl font-black">{ops?'Approval queue and requests':'My bay requests'}</h2><button onClick={onClose}><X size={18}/></button></div>
     {error&&<p className="text-red-400 text-sm">{error}</p>}{!requests.length&&<p className="text-sm text-muted-foreground">No requests yet.</p>}
-    {requests.map(r=><div key={r.id} className="border border-border rounded p-4 space-y-2"><div className="flex justify-between gap-2"><div className="font-bold">{r.name} · {r.winhits_number}</div><span className="text-sm capitalize">{r.status}</span></div><div className="text-xs text-muted-foreground">{r.prep_date} → {r.ship_date} · {r.bays.map(b=>b.bay).join(', ')}</div>
+    {requests.map(r=><div key={r.id} className="border border-border rounded p-4 space-y-2"><div className="flex justify-between gap-2"><div className="font-bold">{r.name} · {r.winhits_number}</div><span className="text-sm capitalize">{r.status}</span></div><div className="text-xs text-muted-foreground">{ukDate(r.prep_date)} → {ukDate(r.ship_date)} · {r.bays.map(b=>b.bay).join(', ')}</div>
       {r.notes&&<div className="text-sm">Notes: {r.notes}</div>}{r.rejection_reason&&<div className="text-sm text-red-400">Rejection reason: {r.rejection_reason}</div>}
       <div className="flex flex-wrap gap-2">{ops&&r.status==='pending'&&<><button disabled={busy} onClick={()=>decide(r,'approved')} className="bg-prg-red text-white rounded px-3 py-2 text-sm">Approve</button><button disabled={busy} onClick={()=>decide(r,'rejected')} className="border border-border rounded px-3 py-2 text-sm">Reject</button></>}{!ops&&r.status!=='approved'&&<button className="border border-border rounded px-3 py-2 text-sm" onClick={()=>onEdit({...r,request_id:r.id})}>Edit / Resubmit</button>}</div>
     </div>)}<button className="border border-border rounded px-3 py-2" onClick={onClose}>Close</button></div></div>
@@ -579,12 +585,12 @@ function ManualBookingModal({ onClose, onSaved, editing }) {
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
           <label className="block">
             <span className="text-[10px] uppercase tracking-widest text-muted-foreground">Start date</span>
-            <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} data-testid="manual-booking-start"
+            <input type="date" lang="en-GB" value={startDate} onChange={(e) => setStartDate(e.target.value)} data-testid="manual-booking-start"
               className="mt-1 w-full h-9 px-2 rounded-btn bg-background border border-border text-sm" />
           </label>
           <label className="block">
             <span className="text-[10px] uppercase tracking-widest text-muted-foreground">End date</span>
-            <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} data-testid="manual-booking-end"
+            <input type="date" lang="en-GB" value={endDate} onChange={(e) => setEndDate(e.target.value)} data-testid="manual-booking-end"
               className="mt-1 w-full h-9 px-2 rounded-btn bg-background border border-border text-sm" />
           </label>
           <label className="block col-span-2 sm:col-span-1">
@@ -615,7 +621,7 @@ function ManualBookingModal({ onClose, onSaved, editing }) {
                     onClick={() => !disabled && toggleBay(bay)}
                     disabled={disabled}
                     data-testid={`manual-booking-bay-${bay.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`}
-                    title={conflict ? `Booked by ${conflict.job_name} (${conflict.prep_date} → ${conflict.ship_date})` : bay}
+                    title={conflict ? `Booked by ${conflict.job_name} (${ukDate(conflict.prep_date)} → ${ukDate(conflict.ship_date)})` : bay}
                     className={`text-left px-3 py-2 rounded-btn border text-sm font-semibold transition-colors ${
                       selected ? "bg-prg-red text-white border-prg-red"
                         : disabled ? "border-border bg-background/50 text-muted-foreground/50 line-through cursor-not-allowed"

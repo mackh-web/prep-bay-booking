@@ -278,6 +278,8 @@ async def bookings(year:int,month:int,user=Depends(calendar_user)):
     end=date(year+1,1,1) if month==12 else date(year,month+1,1)
     rows=await query("""
         select j.id,j.name,j.winhits_number,j.prep_date,j.ship_date,j.status,j.prep_bays,
+               (select min(x.prep_date) from public.calendar_jobs x where x.group_id=j.group_id or (j.group_id is null and x.id=j.id)) as group_first_prep,
+               (select max(x.ship_date) from public.calendar_jobs x where x.group_id=j.group_id or (j.group_id is null and x.id=j.id)) as group_last_ship,
                coalesce((select jsonb_object_agg(a.bay,a.department)
                          from public.calendar_job_bay_assignments a
                          where a.job_id=j.id), '{}'::jsonb) as bay_departments
@@ -285,7 +287,7 @@ async def bookings(year:int,month:int,user=Depends(calendar_user)):
         where j.prep_bays != '{}' and j.prep_date < $2 and j.ship_date >= $1
     """,start,end)
     manual=await query('select id,bay,label,department,start_date,end_date,created_by_name from public.calendar_manual_bookings where start_date < $2 and end_date >= $1',start,end)
-    return {'bays':BAYS,'month_start':start.isoformat(),'month_end_next':end.isoformat(), 'bookings':[{'job_id':str(r['id']),'job_name':r['name'],'winhits_number':r['winhits_number'],'prep_date':r['prep_date'].isoformat(),'ship_date':r['ship_date'].isoformat(),'status':r['status'],'prep_bays':r['prep_bays'] or [],'bay_departments':json.loads(r['bay_departments']) if isinstance(r['bay_departments'],str) else r['bay_departments']} for r in rows], 'manual_bookings':[{**dict(m),'id':str(m['id']),'start_date':m['start_date'].isoformat(),'end_date':m['end_date'].isoformat()} for m in manual]}
+    return {'bays':BAYS,'month_start':start.isoformat(),'month_end_next':end.isoformat(), 'bookings':[{'job_id':str(r['id']),'job_name':r['name'],'winhits_number':r['winhits_number'],'prep_date':r['prep_date'].isoformat(),'ship_date':r['ship_date'].isoformat(),'group_first_prep':(r['group_first_prep'] or r['prep_date']).isoformat(),'group_last_ship':(r['group_last_ship'] or r['ship_date']).isoformat(),'status':r['status'],'prep_bays':r['prep_bays'] or [],'bay_departments':json.loads(r['bay_departments']) if isinstance(r['bay_departments'],str) else r['bay_departments']} for r in rows], 'manual_bookings':[{**dict(m),'id':str(m['id']),'start_date':m['start_date'].isoformat(),'end_date':m['end_date'].isoformat()} for m in manual]}
 
 async def conflicts(start:date,end:date,bays:list[str],exclude_job:Optional[UUID]=None,exclude_manual:Optional[UUID]=None,conn=None):
     jobs=await (conn.fetch if conn else query)("select id,name,prep_bays from public.calendar_jobs where prep_date <= $2 and ship_date >= $1 and ($3::uuid is null or id<>$3) and prep_bays && $4::text[]",start,end,exclude_job,bays)
@@ -618,3 +620,24 @@ async def delete_calendar_job(job_id: UUID, user=Depends(admin)):
     finally:
         await conn.close()
     return {'ok': True, 'deleted_job_id': str(job_id)}
+
+
+@app.delete('/api/admin/jobs/{job_id}/group')
+async def delete_calendar_job_group(job_id: UUID, user=Depends(admin)):
+    """Delete every booking in the linked job group, preserving request history."""
+    conn = await db()
+    try:
+        async with conn.transaction():
+            await conn.execute('select pg_advisory_xact_lock(4172314)')
+            job = await conn.fetchrow('select id, group_id from public.calendar_jobs where id=$1 for update', job_id)
+            if not job:
+                raise HTTPException(404, 'Job not found')
+            group_id = job['group_id'] or job['id']
+            rows = await conn.fetch('select id from public.calendar_jobs where group_id=$1 or (group_id is null and id=$2) for update', group_id, job_id)
+            ids = [r['id'] for r in rows]
+            # Approval history is retained, with its deleted booking reference cleared.
+            await conn.execute('update public.calendar_booking_requests set job_id=null where job_id=any($1::uuid[])', ids)
+            await conn.execute('delete from public.calendar_jobs where id=any($1::uuid[])', ids)
+    finally:
+        await conn.close()
+    return {'ok': True, 'deleted_bookings': len(ids)}
