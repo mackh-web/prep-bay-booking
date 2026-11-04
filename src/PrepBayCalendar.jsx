@@ -40,7 +40,8 @@ async function getMonth(year, month, force = false) {
   monthInFlight.set(key, pending);
   return pending;
 }
-function invalidateMonths() { monthCache.clear(); }
+export function invalidateCalendarCache() { monthCache.clear(); }
+function invalidateMonths() { invalidateCalendarCache(); }
 const EMPTY_ARRAY = [];
 
 // Colour by department, not by individual job — every bay booked for the
@@ -65,7 +66,7 @@ function isoDate(year, monthIndex, day) {
   return `${year}-${String(monthIndex + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
-export default function PrepBayCalendar() {
+export default function PrepBayCalendar({onOpenJob = (id) => { window.location.hash = `#/jobs/${id}`; }}) {
   const { user } = useAuth();
   const canBookBays = ["project_manager", "operations_manager", "admin"].includes(user?.role);
   const canManageDirect = ["operations_manager", "admin"].includes(user?.role);
@@ -153,7 +154,7 @@ export default function PrepBayCalendar() {
         map[bay].push({
           kind: "job", key: `job-${b.job_id}-${bay}`, ...clip,
           colour: deptColour(department), department,
-          label: b.job_name, href: `/jobs/${b.job_id}`,
+          label: b.job_name, jobId: b.job_id,
           title: `${b.job_name} · ${b.prep_date} → ${b.ship_date}${department ? ` · ${department}` : ""}`,
         });
       }
@@ -288,9 +289,9 @@ export default function PrepBayCalendar() {
                     };
                     const className = "absolute top-1.5 h-7 rounded-md px-2 flex items-center text-[11px] font-semibold text-white overflow-hidden shadow-sm hover:brightness-110 transition-[filter]";
                     return b.kind === "job" ? (
-                      <div key={b.key} data-testid={`calendar-bar-${b.key}`} className={className} style={style} title={b.title}>
+                      <button type="button" key={b.key} data-testid={`calendar-bar-${b.key}`} className={`${className} text-left cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-white`} style={style} title={`${b.title} · Open job details`} onClick={() => onOpenJob(b.jobId)} aria-label={`Open job details for ${b.label}`}>
                         <span className="truncate">{b.label}</span>
-                      </div>
+                      </button>
                     ) : (
                       <div key={b.key} data-testid={`calendar-bar-${b.key}`} className={className} style={style} title={b.title}>
                         <span className="truncate flex-1">{b.label}</span>
@@ -358,9 +359,9 @@ export default function PrepBayCalendar() {
                 {[...new Map(bookings.map((b) => [b.job_id, b])).values()].map((b) => (
                   <div key={b.job_id} data-testid={`calendar-legend-${b.job_id}`}
                     className="inline-flex items-center gap-2 text-xs bg-secondary border border-border rounded-btn px-2.5 h-8 hover:border-prg-red transition-colors">
-                    <span className="font-semibold">{b.job_name}</span>
+                    <button type="button" className="font-semibold hover:underline text-left" onClick={() => onOpenJob(b.job_id)}>{b.job_name}</button>
                     <span className="text-muted-foreground font-mono text-[10px]">{b.prep_date} → {b.ship_date}</span>
-                    {canManageDirect && <button className="text-prg-red underline" onClick={() => { setEditJob({...b, id:b.job_id,name:b.job_name}); setShowBooking(true); }}>Edit</button>}
+                    <button className="text-prg-red underline" onClick={() => onOpenJob(b.job_id)}>Details</button>
                     {user?.role === "admin" && <button type="button" className="text-red-400 underline" aria-label={`Delete job ${b.job_name}`} onClick={() => deleteJob(b)}>Delete</button>}
                   </div>
                 ))}
@@ -491,7 +492,7 @@ function RequestsPanel({onClose,onRefresh,onEdit}){
     {error&&<p className="text-red-400 text-sm">{error}</p>}{!requests.length&&<p className="text-sm text-muted-foreground">No requests yet.</p>}
     {requests.map(r=><div key={r.id} className="border border-border rounded p-4 space-y-2"><div className="flex justify-between gap-2"><div className="font-bold">{r.name} · {r.winhits_number}</div><span className="text-sm capitalize">{r.status}</span></div><div className="text-xs text-muted-foreground">{r.prep_date} → {r.ship_date} · {r.bays.map(b=>b.bay).join(', ')}</div>
       {r.notes&&<div className="text-sm">Notes: {r.notes}</div>}{r.rejection_reason&&<div className="text-sm text-red-400">Rejection reason: {r.rejection_reason}</div>}
-      <div className="flex flex-wrap gap-2">{ops&&r.status==='pending'&&<><button disabled={busy} onClick={()=>decide(r,'approved')} className="bg-prg-red text-white rounded px-3 py-2 text-sm">Approve</button><button disabled={busy} onClick={()=>decide(r,'rejected')} className="border border-border rounded px-3 py-2 text-sm">Reject</button></>}{!ops&&<button className="border border-border rounded px-3 py-2 text-sm" onClick={()=>onEdit({...r,request_id:r.id})}>Edit / Resubmit</button>}</div>
+      <div className="flex flex-wrap gap-2">{ops&&r.status==='pending'&&<><button disabled={busy} onClick={()=>decide(r,'approved')} className="bg-prg-red text-white rounded px-3 py-2 text-sm">Approve</button><button disabled={busy} onClick={()=>decide(r,'rejected')} className="border border-border rounded px-3 py-2 text-sm">Reject</button></>}{!ops&&r.status!=='approved'&&<button className="border border-border rounded px-3 py-2 text-sm" onClick={()=>onEdit({...r,request_id:r.id})}>Edit / Resubmit</button>}</div>
     </div>)}<button className="border border-border rounded px-3 py-2" onClick={onClose}>Close</button></div></div>
 }
 

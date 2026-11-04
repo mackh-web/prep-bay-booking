@@ -129,6 +129,118 @@ async def change_initial_password(body: PasswordChange, request: Request, respon
     response.delete_cookie('calendar_access', path='/api', secure=True, httponly=True, samesite='lax')
     return {'ok':True, 'message':'Password changed. Please sign in with your new password.'}
 
+
+# Group identity is stable even when a WinHits number is corrected.
+# Existing records are linked by the data-preserving migration.
+async def attach_job_group(conn, job_id:UUID, winhits:str):
+    match=await conn.fetchrow("""select group_id from public.calendar_jobs
+        where id<>$1 and lower(btrim(winhits_number))=lower(btrim($2))
+        and nullif(btrim(winhits_number),'') is not null and group_id is not null
+        order by created_at,id limit 1""",job_id,winhits)
+    await conn.execute('update public.calendar_jobs set group_id=$2 where id=$1',job_id,match['group_id'] if match else job_id)
+
+async def update_group_metadata(conn, job_id:UUID, name:str, winhits:str):
+    row=await conn.fetchrow('select group_id from public.calendar_jobs where id=$1',job_id)
+    if not row: raise HTTPException(404,'Job not found')
+    # Never silently merge two unrelated groups by editing the reference.
+    collision=await conn.fetchval("""select exists(select 1 from public.calendar_jobs
+        where lower(btrim(winhits_number))=lower(btrim($2))
+        and group_id is distinct from $1)""",row['group_id'],winhits)
+    if collision: raise HTTPException(409,'WinHits number belongs to another job group. Edit that group instead.')
+    await conn.execute('update public.calendar_jobs set name=$2,winhits_number=$3,updated_at=now() where group_id=$1',row['group_id'],name,winhits)
+    # Keep pending proposals in sync with corrected shared identifiers.
+    await conn.execute("""update public.calendar_booking_requests r set name=$2,winhits_number=$3,updated_at=now()
+        where r.status='pending' and r.job_id in (select id from public.calendar_jobs where group_id=$1)""",row['group_id'],name,winhits)
+
+async def group_member(conn, job_id:UUID):
+    row=await conn.fetchrow('select id,group_id,created_by from public.calendar_jobs where id=$1',job_id)
+    if not row: raise HTTPException(404,'Job not found')
+    return row
+
+async def pm_owns_group(conn, group_id:UUID, user_id:UUID):
+    return await conn.fetchval("""select exists(
+      select 1 from public.calendar_jobs j where j.group_id=$1 and j.created_by=$2
+      union all
+      select 1 from public.calendar_booking_requests r join public.calendar_jobs j on j.id=r.job_id
+      where j.group_id=$1 and r.requester_id=$2 and r.status='approved'
+    )""",group_id,user_id)
+
+@app.get('/api/jobs/{job_id}/details')
+async def job_details(job_id:UUID,user=Depends(calendar_user)):
+    conn=await db()
+    try:
+        member=await group_member(conn,job_id)
+        rows=await conn.fetch("""select j.id,j.group_id,j.name,j.winhits_number,j.prep_date,j.ship_date,j.status,
+          j.prep_bays,j.notes,j.created_by,j.created_at,
+          coalesce((select jsonb_object_agg(a.bay,a.department)
+          from public.calendar_job_bay_assignments a where a.job_id=j.id),'{}'::jsonb) as bay_departments
+          from public.calendar_jobs j where j.group_id=$1 order by j.prep_date,j.id""",member['group_id'])
+        reqs=await conn.fetch("""select id,job_id,status,requester_id,prep_date,ship_date,bays,notes,
+            rejection_reason,created_at,updated_at from public.calendar_booking_requests
+            where job_id=any($1::uuid[]) order by created_at desc limit 100""",[r['id'] for r in rows])
+        can_pm_edit=(user['role']=='project_manager' and await pm_owns_group(conn,member['group_id'],user['id']))
+        def serial(row):
+            d=dict(row)
+            for k,v in list(d.items()):
+                if isinstance(v,(UUID,date,datetime)):d[k]=str(v) if isinstance(v,UUID) else v.isoformat()
+                elif isinstance(v,str) and k in ('bays','bay_departments'):
+                    try:d[k]=json.loads(v)
+                    except ValueError:pass
+            return d
+        return {'group_id':str(member['group_id']),'bookings':[serial(r) for r in rows],
+            'requests':[serial(r) for r in reqs if user['role'] in ('admin','operations_manager') or r['requester_id']==user['id']],
+            'can_pm_edit':can_pm_edit}
+    finally: await conn.close()
+
+class JobMetadata(BaseModel):
+    name:str=Field(min_length=1,max_length=200)
+    winhits_number:str=Field(min_length=1,max_length=100)
+    notes:Optional[str]=Field(default=None,max_length=3000)
+
+@app.patch('/api/jobs/{job_id}/details')
+async def change_job_metadata(job_id:UUID,p:JobMetadata,user=Depends(calendar_user)):
+    if user['role'] not in ('project_manager','operations_manager','admin'):
+        raise HTTPException(403,'Job editing access required')
+    if not p.name.strip() or not p.winhits_number.strip():raise HTTPException(422,'Name and WinHits are required')
+    conn=await db()
+    try:
+        async with conn.transaction():
+            await conn.execute('select pg_advisory_xact_lock(4172314)')
+            member=await group_member(conn,job_id)
+            if user['role']=='project_manager' and not await pm_owns_group(conn,member['group_id'],user['id']):
+                raise HTTPException(403,'You may edit only your own jobs')
+            await update_group_metadata(conn,job_id,p.name.strip(),p.winhits_number.strip())
+            await conn.execute('update public.calendar_jobs set notes=$2,updated_at=now() where id=$1',job_id,p.notes)
+    finally:await conn.close()
+    return {'ok':True}
+
+@app.post('/api/jobs/{job_id}/change-request',status_code=201)
+async def request_job_bay_changes(job_id:UUID,p:JobBooking,user=Depends(calendar_user)):
+    if user['role']!='project_manager':raise HTTPException(403,'Project Manager access required')
+    names=validate_booking(p)
+    conn=await db()
+    try:
+        async with conn.transaction():
+            await conn.execute('select pg_advisory_xact_lock(4172314)')
+            member=await group_member(conn,job_id)
+            if not await pm_owns_group(conn,member['group_id'],user['id']):
+                raise HTTPException(403,'You may request changes only to your own jobs')
+            current=await conn.fetchrow('select name,winhits_number from public.calendar_jobs where id=$1',job_id)
+            # Dates/bays only: shared job metadata is updated through the immediate-edit endpoint.
+            if any((await conflicts(p.prep_date,p.ship_date,names,exclude_job=job_id,conn=conn)).values()):
+                raise HTTPException(409,'One or more selected bays are already booked')
+            pending=await conn.fetchval("""select exists(select 1 from public.calendar_booking_requests
+                where job_id=$1 and status='pending')""",job_id)
+            if pending:raise HTTPException(409,'This allocation already has a pending change request')
+            r=await conn.fetchrow("""insert into public.calendar_booking_requests
+                (requester_id,job_id,name,winhits_number,prep_date,ship_date,bays,notes,status)
+                values($1,$2,$3,$4,$5,$6,$7,$8,'pending') returning id""",
+                user['id'],job_id,current['name'],current['winhits_number'],p.prep_date,p.ship_date,
+                json.dumps([b.model_dump() for b in p.bays]),p.notes)
+            await notify_ops(conn,'request_submitted',f'Bay/date change requested: {current["name"]}',r['id'])
+            return {'ok':True,'id':str(r['id'])}
+    finally:await conn.close()
+
 @app.get('/api/jobs')
 async def jobs(user=Depends(calendar_user)):
     rows = await query('select id,name,winhits_number,prep_date,ship_date,prep_bays,created_by,notes from public.calendar_jobs order by prep_date desc nulls last limit 2000')
@@ -213,6 +325,8 @@ async def direct_booking(p:JobBooking,user=Depends(editor)):
                 raise HTTPException(409,'One or more prep bays have already been booked')
             job=await conn.fetchrow("""insert into public.calendar_jobs(name,winhits_number,prep_date,ship_date,prep_bays,created_by,notes)
                 values($1,$2,$3,$4,$5,$6,$7) returning id""",p.name.strip(),p.winhits_number.strip(),p.prep_date,p.ship_date,names,user['id'],p.notes)
+            await attach_job_group(conn, job['id'], p.winhits_number)
+            await update_group_metadata(conn, job['id'], p.name.strip(), p.winhits_number.strip())
             await store_assignments(conn,job['id'],p.bays)
             return {'ok':True,'job_id':str(job['id'])}
     finally: await conn.close()
@@ -229,6 +343,7 @@ async def edit_direct_booking(job_id:UUID,p:JobBooking,user=Depends(editor)):
             if any((await conflicts(p.prep_date,p.ship_date,names,exclude_job=job_id,conn=conn)).values()):
                 raise HTTPException(409,'One or more prep bays have already been booked')
             await conn.execute("""update public.calendar_jobs set name=$2,winhits_number=$3,prep_date=$4,ship_date=$5,prep_bays=$6,notes=$7,updated_at=now() where id=$1""",job_id,p.name.strip(),p.winhits_number.strip(),p.prep_date,p.ship_date,names,p.notes)
+            await update_group_metadata(conn, job_id, p.name.strip(), p.winhits_number.strip())
             await store_assignments(conn,job_id,p.bays)
     finally: await conn.close()
     return {'ok':True}
@@ -278,6 +393,7 @@ async def revise_request(request_id:UUID,p:JobBooking,user=Depends(calendar_user
             r=await conn.fetchrow('select * from public.calendar_booking_requests where id=$1 for update',request_id)
             if not r: raise HTTPException(404,'Request not found')
             if r['requester_id']!=user['id']: raise HTTPException(403,'You can only edit your own requests')
+            if r['status']=='approved': raise HTTPException(409,'Approved requests are historical records. Request a new bay change from the job details page.')
             if any((await conflicts(p.prep_date,p.ship_date,names,exclude_job=r['job_id'],conn=conn)).values()):
                 raise HTTPException(409,'One or more selected bays are already booked for these dates')
             await conn.execute("""update public.calendar_booking_requests set name=$2,winhits_number=$3,prep_date=$4,ship_date=$5,bays=$6,notes=$7,
@@ -313,6 +429,11 @@ async def decide_request(request_id:UUID,p:Decision,user=Depends(editor)):
                     j=await conn.fetchrow("""insert into public.calendar_jobs(name,winhits_number,prep_date,ship_date,prep_bays,created_by,notes)
                         values($1,$2,$3,$4,$5,$6,$7) returning id""",r['name'],r['winhits_number'],r['prep_date'],r['ship_date'],names,r['requester_id'],r['notes'])
                     job_id=j['id']
+                if not r['job_id']:
+                    await attach_job_group(conn, job_id, r['winhits_number'])
+                    await update_group_metadata(conn, job_id, r['name'], r['winhits_number'])
+                else:
+                    await update_group_metadata(conn, job_id, r['name'], r['winhits_number'])
                 await store_assignments(conn,job_id,bays)
                 await conn.execute('update public.calendar_booking_requests set job_id=$2 where id=$1',request_id,job_id)
             await conn.execute("""update public.calendar_booking_requests set status=$2,rejection_reason=$3,reviewer_id=$4,reviewed_at=now(),updated_at=now() where id=$1""",request_id,p.decision,(p.rejection_reason or '').strip() if p.decision=='rejected' else None,user['id'])
