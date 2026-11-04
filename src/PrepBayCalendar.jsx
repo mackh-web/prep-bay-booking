@@ -73,7 +73,7 @@ function isoDate(year, monthIndex, day) {
   return `${year}-${String(monthIndex + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
-export default function PrepBayCalendar({onOpenJob = (id) => { window.location.hash = `#/jobs/${id}`; }}) {
+export default function PrepBayCalendar({onOpenJob = (id) => { window.location.hash = `#/jobs/${id}`; }, onOpenApprovals = () => { window.location.hash = '#/approvals'; }}) {
   const { user } = useAuth();
   const canBookBays = ["project_manager", "operations_manager", "admin"].includes(user?.role);
   const canManageDirect = ["operations_manager", "admin"].includes(user?.role);
@@ -211,7 +211,7 @@ export default function PrepBayCalendar({onOpenJob = (id) => { window.location.h
                 className="min-h-11 px-3 rounded-btn justify-center bg-secondary border border-border hover:border-prg-red text-xs font-bold uppercase tracking-widest inline-flex items-center gap-2">
                 <Wrench size={14} /> Manual Booking
               </button>}
-              <button onClick={() => setShowRequests(true)} className="min-h-11 px-3 rounded-btn border border-border bg-secondary text-xs font-bold uppercase tracking-widest">{canManageDirect ? "Approvals / Requests" : "My Requests"}</button>
+              {!canManageDirect && <button onClick={() => setShowRequests(true)} className="min-h-11 px-3 rounded-btn border border-border bg-secondary text-xs font-bold uppercase tracking-widest">My Requests</button>}
             </div>
           )}
           <div className="flex items-center justify-between sm:justify-start gap-2 w-full">
@@ -385,8 +385,8 @@ export default function PrepBayCalendar({onOpenJob = (id) => { window.location.h
         />
       )}
 
-      {showRequests && <RequestsPanel onClose={() => setShowRequests(false)} onRefresh={() => { load(); refreshNotifications(); }} onEdit={(r) => { setEditJob(r); setShowRequests(false); setShowBooking(true); }} />}
-      {canBookBays && notifications.length > 0 && <div className="fixed bottom-4 right-4 z-40 w-80 max-w-[90vw] bg-card border border-border shadow-xl rounded-xl p-3 space-y-2"><div className="font-bold text-sm">Notifications ({notifications.length})</div>{notifications.slice(0,4).map(n=><div key={n.id} className="text-xs border-t border-border pt-2"><div>{n.message}</div><button className="text-prg-red mt-1" onClick={async()=>{await api.post(`/prep-bays/notifications/${n.id}/read`);refreshNotifications();}}>Dismiss</button></div>)}<button className="text-xs underline" onClick={() => setShowRequests(true)}>View requests</button></div>}
+      {showRequests && !canManageDirect && <RequestsPanel onClose={() => setShowRequests(false)} onRefresh={() => { load(); refreshNotifications(); }} onEdit={(r) => { setEditJob(r); setShowRequests(false); setShowBooking(true); }} />}
+      {canBookBays && notifications.length > 0 && <div className="fixed bottom-4 right-4 z-40 w-80 max-w-[90vw] bg-card border border-border shadow-xl rounded-xl p-3 space-y-2"><div className="font-bold text-sm">Notifications ({notifications.length})</div>{notifications.slice(0,4).map(n=><div key={n.id} className="text-xs border-t border-border pt-2"><div>{n.message}</div><button className="text-prg-red mt-1" onClick={async()=>{await api.post(`/prep-bays/notifications/${n.id}/read`);refreshNotifications();}}>Dismiss</button></div>)}<button className="text-xs underline" onClick={() => canManageDirect ? onOpenApprovals() : setShowRequests(true)}>View requests</button></div>}
       {showManual && (
         <ManualBookingModal
           onClose={() => setShowManual(false)}
