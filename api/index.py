@@ -192,6 +192,26 @@ async def job_details(job_id:UUID,user=Depends(calendar_user)):
             'can_pm_edit':can_pm_edit}
     finally: await conn.close()
 
+class Bay(BaseModel):
+    bay:str
+    department:Optional[str]=None
+class JobBooking(BaseModel):
+    name: str = Field(min_length=1,max_length=200)
+    winhits_number: str = Field(min_length=1,max_length=100)
+    prep_date: date
+    ship_date: date
+    bays: list[Bay] = Field(min_length=1)
+    notes: Optional[str] = Field(default=None,max_length=3000)
+
+def validate_booking(p:JobBooking):
+    names=[b.bay for b in p.bays]
+    if p.ship_date < p.prep_date: raise HTTPException(422,'Ship date must not precede prep date')
+    if not p.name.strip() or not p.winhits_number.strip(): raise HTTPException(422,'Job name and WinHits number are required')
+    if len(names)!=len(set(names)) or any(n not in BAYS for n in names): raise HTTPException(422,'Select valid, distinct bays')
+    if any(b.department and b.department not in DEPTS for b in p.bays): raise HTTPException(422,'Invalid department')
+    return names
+
+
 class JobMetadata(BaseModel):
     name:str=Field(min_length=1,max_length=200)
     winhits_number:str=Field(min_length=1,max_length=100)
@@ -281,25 +301,6 @@ async def conflicts(start:date,end:date,bays:list[str],exclude_job:Optional[UUID
 async def availability(prep_date:date,ship_date:date,exclude_job_id:Optional[UUID]=None,exclude_manual_id:Optional[UUID]=None,user=Depends(calendar_user)):
     found=await conflicts(prep_date,ship_date,BAYS,exclude_job_id,exclude_manual_id)
     return [{'bay':b,'available':not found[b],'conflicts':found[b]} for b in BAYS]
-
-class Bay(BaseModel):
-    bay:str
-    department:Optional[str]=None
-class JobBooking(BaseModel):
-    name: str = Field(min_length=1,max_length=200)
-    winhits_number: str = Field(min_length=1,max_length=100)
-    prep_date: date
-    ship_date: date
-    bays: list[Bay] = Field(min_length=1)
-    notes: Optional[str] = Field(default=None,max_length=3000)
-
-def validate_booking(p:JobBooking):
-    names=[b.bay for b in p.bays]
-    if p.ship_date < p.prep_date: raise HTTPException(422,'Ship date must not precede prep date')
-    if not p.name.strip() or not p.winhits_number.strip(): raise HTTPException(422,'Job name and WinHits number are required')
-    if len(names)!=len(set(names)) or any(n not in BAYS for n in names): raise HTTPException(422,'Select valid, distinct bays')
-    if any(b.department and b.department not in DEPTS for b in p.bays): raise HTTPException(422,'Invalid department')
-    return names
 
 async def store_assignments(conn,job_id,bays):
     await conn.execute('delete from public.calendar_job_bay_assignments where job_id=$1',job_id)
