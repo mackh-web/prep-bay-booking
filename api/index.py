@@ -45,7 +45,7 @@ async def auth_user(request: Request):
     return {'id': uid, 'email': r.json().get('email'), 'role': row['role']}
 
 async def editor(user=Depends(auth_user)):
-    if user['role'] != 'editor': raise HTTPException(403, 'Editor access required')
+    if user['role'] not in ('editor', 'admin'): raise HTTPException(403, 'Editor access required')
     return user
 
 @app.post('/api/auth/login')
@@ -197,4 +197,92 @@ async def manual_edit(booking_id:UUID,p:ManualEdit,user=Depends(editor)):
 @app.delete('/api/prep-bays/manual-booking/{booking_id}')
 async def manual_delete(booking_id:UUID,user=Depends(editor)):
     await query('delete from public.calendar_manual_bookings where id=$1',booking_id,execute=True)
+    return {'ok':True}
+
+
+# Calendar-only account management. Never expose the Supabase secret to the browser.
+class UserCreate(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=12, max_length=128)
+    role: str = 'viewer'
+
+class UserUpdate(BaseModel):
+    role: str
+    enabled: bool = True
+
+async def admin(user=Depends(auth_user)):
+    if user['role'] != 'admin':
+        raise HTTPException(403, 'Administrator access required')
+    return user
+
+def check_role(role):
+    if role not in ('viewer', 'editor', 'admin'):
+        raise HTTPException(422, 'Invalid calendar role')
+
+async def supabase_admin(method, path, payload=None):
+    _, url, _ = settings()
+    secret = os.environ.get('SUPABASE_SECRET_KEY')
+    if not secret:
+        raise HTTPException(503, 'SUPABASE_SECRET_KEY is not configured')
+    headers = {'apikey': secret, 'Authorization': f'Bearer {secret}', 'Content-Type': 'application/json'}
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            result = await client.request(method, f'{url}/auth/v1/admin/{path}', headers=headers, json=payload)
+        except httpx.RequestError:
+            raise HTTPException(503, 'Authentication service unavailable')
+    if result.status_code >= 400:
+        # Do not return raw Supabase errors or credentials to clients.
+        if result.status_code in (400, 409, 422):
+            raise HTTPException(409, 'The account could not be changed; check for an existing email or invalid details')
+        raise HTTPException(502, 'Supabase user administration failed')
+    return result.json() if result.content else {}
+
+@app.get('/api/admin/users')
+async def list_calendar_users(user=Depends(admin)):
+    rows = await query("""select c.user_id,c.role,c.enabled,u.email,u.created_at
+                          from public.calendar_users c join auth.users u on u.id=c.user_id
+                          order by lower(u.email)""")
+    return [{'id': str(r['user_id']), 'email':r['email'], 'role':r['role'],
+             'enabled':r['enabled'], 'created_at':r['created_at'].isoformat()} for r in rows]
+
+@app.post('/api/admin/users', status_code=201)
+async def create_calendar_user(body:UserCreate, user=Depends(admin)):
+    check_role(body.role)
+    email=body.email.strip().lower()
+    if '@' not in email or not email.split('@')[-1].count('.'):
+        raise HTTPException(422, 'Invalid email address')
+    # Create Auth user first, then its dedicated calendar permission row.
+    created = await supabase_admin('POST', 'users', {'email':email, 'password':body.password, 'email_confirm':True})
+    uid = UUID(created['id'])
+    try:
+        await query('insert into public.calendar_users(user_id,role,enabled) values($1,$2,true)',uid,body.role,execute=True)
+    except Exception:
+        await supabase_admin('DELETE',f'users/{uid}')
+        raise HTTPException(500,'Unable to save calendar permissions; user creation rolled back')
+    return {'id':str(uid),'email':email,'role':body.role,'enabled':True}
+
+async def ensure_other_admin(target:UUID, new_role:Optional[str]=None, enabled:bool=True):
+    row=await query('select role,enabled from public.calendar_users where user_id=$1',target,one=True)
+    if not row: raise HTTPException(404,'Calendar user not found')
+    if row['role']=='admin' and row['enabled'] and (new_role!='admin' or not enabled):
+        count=await query("select count(*) as n from public.calendar_users where role='admin' and enabled=true",one=True)
+        if count['n'] <= 1: raise HTTPException(409,'Cannot remove or disable the last active administrator')
+    return row
+
+@app.patch('/api/admin/users/{target}')
+async def update_calendar_user(target:UUID, body:UserUpdate, user=Depends(admin)):
+    check_role(body.role)
+    if target == user['id'] and (body.role != 'admin' or not body.enabled):
+        raise HTTPException(409,'You cannot remove your own administrator access')
+    await ensure_other_admin(target,body.role,body.enabled)
+    await query('update public.calendar_users set role=$2,enabled=$3 where user_id=$1',target,body.role,body.enabled,execute=True)
+    return {'ok':True}
+
+@app.delete('/api/admin/users/{target}')
+async def delete_calendar_user(target:UUID,user=Depends(admin)):
+    if target == user['id']:
+        raise HTTPException(409,'You cannot delete your own account')
+    await ensure_other_admin(target,new_role=None)
+    # Delete the Supabase Auth identity. The FK cascade deletes calendar_users.
+    await supabase_admin('DELETE',f'users/{target}')
     return {'ok':True}

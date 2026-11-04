@@ -44,7 +44,7 @@ function isoDate(year, monthIndex, day) {
 
 export default function PrepBayCalendar() {
   const { user } = useAuth();
-  const canBookBays = user?.role === "editor";
+  const canBookBays = ["editor", "admin"].includes(user?.role);
   const today = useMemo(() => new Date(), []);
   const [year, setYear] = useState(today.getFullYear());
   const [monthIndex, setMonthIndex] = useState(today.getMonth()); // 0-based
