@@ -224,6 +224,9 @@ async def submit_request(p:JobBooking,user=Depends(calendar_user)):
     conn=await db()
     try:
         async with conn.transaction():
+            await conn.execute('select pg_advisory_xact_lock(4172314)')
+            if any((await conflicts(p.prep_date,p.ship_date,names,conn=conn)).values()):
+                raise HTTPException(409,'One or more selected bays are already booked for these dates')
             r=await conn.fetchrow("""insert into public.calendar_booking_requests(requester_id,name,winhits_number,prep_date,ship_date,bays,notes,status)
                 values($1,$2,$3,$4,$5,$6,$7,'pending') returning id""",user['id'],p.name.strip(),p.winhits_number.strip(),p.prep_date,p.ship_date,json.dumps([b.model_dump() for b in p.bays]),p.notes)
             await notify_ops(conn,'request_submitted',f'New bay request: {p.name.strip()}',r['id'])
@@ -233,13 +236,16 @@ async def submit_request(p:JobBooking,user=Depends(calendar_user)):
 @app.put('/api/prep-bays/requests/{request_id}')
 async def revise_request(request_id:UUID,p:JobBooking,user=Depends(calendar_user)):
     if user['role']!='project_manager': raise HTTPException(403,'Project Manager access required')
-    validate_booking(p)
+    names=validate_booking(p)
     conn=await db()
     try:
         async with conn.transaction():
+            await conn.execute('select pg_advisory_xact_lock(4172314)')
             r=await conn.fetchrow('select * from public.calendar_booking_requests where id=$1 for update',request_id)
             if not r: raise HTTPException(404,'Request not found')
             if r['requester_id']!=user['id']: raise HTTPException(403,'You can only edit your own requests')
+            if any((await conflicts(p.prep_date,p.ship_date,names,exclude_job=r['job_id'],conn=conn)).values()):
+                raise HTTPException(409,'One or more selected bays are already booked for these dates')
             await conn.execute("""update public.calendar_booking_requests set name=$2,winhits_number=$3,prep_date=$4,ship_date=$5,bays=$6,notes=$7,
                 status='pending',rejection_reason=null,reviewer_id=null,reviewed_at=null,updated_at=now() where id=$1""",request_id,p.name.strip(),p.winhits_number.strip(),p.prep_date,p.ship_date,json.dumps([b.model_dump() for b in p.bays]),p.notes)
             await notify_ops(conn,'request_resubmitted',f'Request updated: {p.name.strip()}',request_id)

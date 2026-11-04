@@ -376,13 +376,33 @@ function BookBaysModal({onClose,onSaved,editing}) {
     return s;
   });
   const [availability,setAvailability]=useState([]);
+  const [availabilityLoading,setAvailabilityLoading]=useState(false);
+  const [availabilityError,setAvailabilityError]=useState('');
   const [error,setError]=useState('');const [saving,setSaving]=useState(false);
-  useEffect(()=>{let live=true;if(!prep||!ship||ship<prep){setAvailability([]);return;}
-    api.get('/prep-bays/availability',{params:{prep_date:prep,ship_date:ship,exclude_job_id:editing?.job_id||editing?.id||undefined}})
-      .then(r=>{if(live)setAvailability(r.data)}).catch(()=>{if(live)setAvailability([])});
+  const datesValid=Boolean(prep && ship && ship >= prep);
+  const excludedJobId=editing?.job_id || (editing?.request_id ? undefined : editing?.id);
+  useEffect(()=>{
+    let live=true;
+    setAvailability([]);
+    setAvailabilityError('');
+    setAvailabilityLoading(datesValid);
+    if(!datesValid){setSelection({});return()=>{live=false};}
+    api.get('/prep-bays/availability',{params:{prep_date:prep,ship_date:ship,exclude_job_id:excludedJobId||undefined}})
+      .then(r=>{if(live){setAvailability(r.data);setAvailabilityLoading(false);}})
+      .catch(()=>{if(live){setAvailabilityError('Unable to check availability. Please try changing the dates or reopening this form.');setAvailabilityLoading(false);}});
     return()=>{live=false};
-  },[prep,ship,editing?.id,editing?.job_id]);
-  async function save(e){e.preventDefault();setError('');if(!Object.keys(selection).length){setError('Select at least one bay');return;}
+  },[prep,ship,excludedJobId]);
+  const availabilityReady=datesValid && !availabilityLoading && !availabilityError && availability.length===PREP_BAYS.length;
+  const unavailableBays=availability.filter(b=>!b.available).map(b=>b.bay);
+  useEffect(()=>{
+    if(availabilityReady) setSelection(previous=>Object.fromEntries(Object.entries(previous).filter(([bay])=>!unavailableBays.includes(bay))));
+  },[availabilityReady,availability]);
+  async function save(e){
+    e.preventDefault();setError('');
+    if(!datesValid){setError('Enter a valid Prep Date and Ship Date before selecting bays.');return;}
+    if(!availabilityReady){setError('Please wait for bay availability to finish loading.');return;}
+    if(!Object.keys(selection).length){setError('Select at least one available bay');return;}
+    if(Object.keys(selection).some(bay=>unavailableBays.includes(bay))){setError('One or more selected bays are already booked.');return;}
     setSaving(true);
     const payload={name,winhits_number:winhits,prep_date:prep,ship_date:ship,notes,bays:Object.entries(selection).map(([bay,department])=>({bay,department:department||null}))};
     try {
@@ -404,15 +424,21 @@ function BookBaysModal({onClose,onSaved,editing}) {
     </div>
     <label className="block text-sm">Notes / bay justification (optional)<textarea maxLength={3000} rows={3} value={notes} onChange={e=>setNotes(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded" placeholder="Why are these particular bays required?"/></label>
     <div className="font-semibold text-sm">Select prep bays</div>
-    <div className="grid sm:grid-cols-2 gap-2">{PREP_BAYS.map(bay=>{
-      const selected=Object.hasOwn(selection,bay);const conflict=availability.find(x=>x.bay===bay)?.conflicts?.[0];
-      return <div key={bay} className="border border-border rounded p-2"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={selected} onChange={e=>setSelection(s=>{const n={...s};if(e.target.checked)n[bay]='';else delete n[bay];return n})}/>{bay}</label>
-        {conflict&&<div className="text-xs text-amber-400">Booked: {conflict.job_name}{pm?' (request may be rejected)':''}</div>}
-        {selected&&<select aria-label={`Department for ${bay}`} className="w-full mt-2 bg-secondary border border-border p-1 text-xs" value={selection[bay]} onChange={e=>setSelection(s=>({...s,[bay]:e.target.value}))}><option value="">No department</option>{BAY_DEPARTMENTS.map(d=><option key={d} value={d}>{d}</option>)}</select>}
-      </div>})}</div>
+    {!datesValid ? <p className="text-sm text-muted-foreground">Enter both Prep Date and Ship Date first to see available bays.</p>
+    : availabilityLoading ? <p className="text-sm text-muted-foreground">Checking bay availability…</p>
+    : availabilityError ? <p className="text-sm text-red-400" role="alert">{availabilityError}</p>
+    : <div className="grid sm:grid-cols-2 gap-2">{PREP_BAYS.map(bay=>{
+      const selected=Object.hasOwn(selection,bay);
+      const conflict=availability.find(x=>x.bay===bay)?.conflicts?.[0];
+      const disabled=!availabilityReady || Boolean(conflict);
+      return <div key={bay} className={`border border-border rounded p-2 ${disabled?'opacity-60':''}`}>
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={selected && !disabled} disabled={disabled} onChange={e=>setSelection(current=>{const next={...current};if(e.target.checked)next[bay]='';else delete next[bay];return next;})}/>{bay}</label>
+        {conflict&&<div className="text-xs text-amber-400">Unavailable — booked by {conflict.job_name}</div>}
+        {selected&&!disabled&&<select aria-label={`Department for ${bay}`} className="w-full mt-2 bg-secondary border border-border p-1 text-xs" value={selection[bay]} onChange={e=>setSelection(current=>({...current,[bay]:e.target.value}))}><option value="">No department</option>{BAY_DEPARTMENTS.map(d=><option key={d} value={d}>{d}</option>)}</select>}
+      </div>})}</div>}
     {pm&&<p className="text-xs text-muted-foreground">Requests do not reserve bays. Existing approved bookings remain unchanged until your revision is approved.</p>}
     {error&&<p className="text-red-400 text-sm" role="alert">{error}</p>}
-    <div className="flex gap-3"><button disabled={saving} className="bg-prg-red text-white px-4 py-2 rounded disabled:opacity-50">{saving?'Saving…':pm?'Submit for approval':'Confirm booking'}</button><button type="button" onClick={onClose} className="border border-border rounded px-4 py-2">Cancel</button></div>
+    <div className="flex gap-3"><button disabled={saving || !availabilityReady || !Object.keys(selection).length} className="bg-prg-red text-white px-4 py-2 rounded disabled:opacity-50">{saving?'Saving…':pm?'Submit for approval':'Confirm booking'}</button><button type="button" onClick={onClose} className="border border-border rounded px-4 py-2">Cancel</button></div>
   </form></div>
 }
 
