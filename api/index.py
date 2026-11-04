@@ -1,5 +1,6 @@
 """Dedicated calendar API. No Job Portal profile or role is required."""
 import os
+import json
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID
@@ -51,7 +52,7 @@ async def calendar_user(user=Depends(auth_user)):
 
 async def editor(user=Depends(calendar_user)):
     if user['must_change_password']: raise HTTPException(403, 'You must change your initial password first')
-    if user['role'] not in ('editor', 'admin'): raise HTTPException(403, 'Editor access required')
+    if user['role'] not in ('operations_manager', 'admin'): raise HTTPException(403, 'Operations Manager access required')
     return user
 
 @app.post('/api/auth/login')
@@ -99,32 +100,13 @@ async def change_initial_password(body: PasswordChange, request: Request, respon
 
 @app.get('/api/jobs')
 async def jobs(user=Depends(calendar_user)):
-    rows = await query('select id,name,winhits_number,prep_date,ship_date,prep_bays from public.calendar_jobs order by prep_date desc nulls last limit 2000')
+    rows = await query('select id,name,winhits_number,prep_date,ship_date,prep_bays,created_by,notes from public.calendar_jobs order by prep_date desc nulls last limit 2000')
     ids=[r['id'] for r in rows]
     depts=await query('select job_id,bay,department from public.calendar_job_bay_assignments where job_id=any($1::uuid[])',ids) if ids else []
     mapping={}
     for d in depts: mapping.setdefault(d['job_id'],{})[d['bay']]=d['department']
-    return [{**dict(r),'id':str(r['id']),'prep_date':r['prep_date'].isoformat() if r['prep_date'] else None,'ship_date':r['ship_date'].isoformat() if r['ship_date'] else None,'bay_departments':mapping.get(r['id'],{})} for r in rows]
+    return [{**dict(r),'created_by':str(r['created_by']) if r['created_by'] else None,'id':str(r['id']),'prep_date':r['prep_date'].isoformat() if r['prep_date'] else None,'ship_date':r['ship_date'].isoformat() if r['ship_date'] else None,'bay_departments':mapping.get(r['id'],{})} for r in rows]
 
-
-class NewJob(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    winhits_number: Optional[str] = None
-    prep_date: date
-    ship_date: date
-
-@app.post('/api/jobs')
-async def create_job(payload: NewJob, user=Depends(editor)):
-    if payload.ship_date < payload.prep_date:
-        raise HTTPException(400, 'Ship date must be on or after prep date')
-    row = await query('insert into public.calendar_jobs(name,winhits_number,prep_date,ship_date) values($1,$2,$3,$4) returning id',payload.name.strip(),payload.winhits_number,payload.prep_date,payload.ship_date,one=True)
-    return {'id':str(row['id']),'ok':True}
-
-@app.delete('/api/jobs/{job_id}')
-async def delete_job(job_id:UUID,user=Depends(editor)):
-    result=await query('delete from public.calendar_jobs where id=$1',job_id,execute=True)
-    if result == 'DELETE 0': raise HTTPException(404,'Job not found')
-    return {'ok':True}
 
 @app.get('/api/prep-bays/bookings')
 async def bookings(year:int,month:int,user=Depends(calendar_user)):
@@ -139,9 +121,9 @@ async def bookings(year:int,month:int,user=Depends(calendar_user)):
     manual=await query('select id,bay,label,department,start_date,end_date,created_by_name from public.calendar_manual_bookings where start_date < $2 and end_date >= $1',start,end)
     return {'bays':BAYS,'month_start':start.isoformat(),'month_end_next':end.isoformat(), 'bookings':[{'job_id':str(r['id']),'job_name':r['name'],'winhits_number':r['winhits_number'],'prep_date':r['prep_date'].isoformat(),'ship_date':r['ship_date'].isoformat(),'status':r['status'],'prep_bays':r['prep_bays'] or [],'bay_departments':mapping.get(r['id'],{})} for r in rows], 'manual_bookings':[{**dict(m),'id':str(m['id']),'start_date':m['start_date'].isoformat(),'end_date':m['end_date'].isoformat()} for m in manual]}
 
-async def conflicts(start:date,end:date,bays:list[str],exclude_job:Optional[UUID]=None,exclude_manual:Optional[UUID]=None):
-    jobs=await query("select id,name,prep_bays from public.calendar_jobs where prep_date <= $2 and ship_date >= $1 and ($3::uuid is null or id<>$3) and prep_bays && $4::text[]",start,end,exclude_job,bays)
-    manual=await query('select id,label,bay from public.calendar_manual_bookings where start_date <= $2 and end_date >= $1 and ($3::uuid is null or id<>$3) and bay=any($4::text[])',start,end,exclude_manual,bays)
+async def conflicts(start:date,end:date,bays:list[str],exclude_job:Optional[UUID]=None,exclude_manual:Optional[UUID]=None,conn=None):
+    jobs=await (conn.fetch if conn else query)("select id,name,prep_bays from public.calendar_jobs where prep_date <= $2 and ship_date >= $1 and ($3::uuid is null or id<>$3) and prep_bays && $4::text[]",start,end,exclude_job,bays)
+    manual=await (conn.fetch if conn else query)('select id,label,bay from public.calendar_manual_bookings where start_date <= $2 and end_date >= $1 and ($3::uuid is null or id<>$3) and bay=any($4::text[])',start,end,exclude_manual,bays)
     found={b:[] for b in bays}
     for j in jobs:
         for bay in j['prep_bays'] or []:
@@ -157,28 +139,155 @@ async def availability(prep_date:date,ship_date:date,exclude_job_id:Optional[UUI
 class Bay(BaseModel):
     bay:str
     department:Optional[str]=None
-class Booking(BaseModel):
-    job_id:UUID
-    bays:list[Bay]
+class JobBooking(BaseModel):
+    name: str = Field(min_length=1,max_length=200)
+    winhits_number: str = Field(min_length=1,max_length=100)
+    prep_date: date
+    ship_date: date
+    bays: list[Bay] = Field(min_length=1)
+    notes: Optional[str] = Field(default=None,max_length=3000)
 
-@app.post('/api/prep-bays/booking')
-async def book(payload:Booking,user=Depends(editor)):
-    names=[b.bay for b in payload.bays]
-    if len(set(names))!=len(names) or any(b not in BAYS for b in names) or any(b.department and b.department not in DEPTS for b in payload.bays): raise HTTPException(400,'Invalid bays or departments')
+def validate_booking(p:JobBooking):
+    names=[b.bay for b in p.bays]
+    if p.ship_date < p.prep_date: raise HTTPException(422,'Ship date must not precede prep date')
+    if not p.name.strip() or not p.winhits_number.strip(): raise HTTPException(422,'Job name and WinHits number are required')
+    if len(names)!=len(set(names)) or any(n not in BAYS for n in names): raise HTTPException(422,'Select valid, distinct bays')
+    if any(b.department and b.department not in DEPTS for b in p.bays): raise HTTPException(422,'Invalid department')
+    return names
+
+async def store_assignments(conn,job_id,bays):
+    await conn.execute('delete from public.calendar_job_bay_assignments where job_id=$1',job_id)
+    for b in bays:
+        if b.department:
+            await conn.execute('insert into public.calendar_job_bay_assignments(job_id,bay,department) values($1,$2,$3)',job_id,b.bay,b.department)
+
+async def notify(conn, recipient, kind, message, request_id):
+    await conn.execute('insert into public.calendar_notifications(user_id,kind,message,request_id) values($1,$2,$3,$4)',recipient,kind,message,request_id)
+
+async def notify_ops(conn,kind,message,request_id):
+    users=await conn.fetch("select user_id from public.calendar_users where enabled=true and role in ('operations_manager','admin')")
+    for u in users: await notify(conn,u['user_id'],kind,message,request_id)
+
+@app.post('/api/prep-bays/booking',status_code=201)
+async def direct_booking(p:JobBooking,user=Depends(editor)):
+    names=validate_booking(p)
     conn=await db()
     try:
         async with conn.transaction():
             await conn.execute('select pg_advisory_xact_lock(4172314)')
-            job=await conn.fetchrow('select id,prep_date,ship_date from public.calendar_jobs where id=$1 for update',payload.job_id)
-            if not job: raise HTTPException(404,'Job not found')
-            if not job['prep_date'] or not job['ship_date']: raise HTTPException(400,'Job needs prep and ship dates')
-            found=await conflicts(job['prep_date'],job['ship_date'],names,exclude_job=payload.job_id)
-            if any(found.values()): raise HTTPException(409,'One or more prep bays are already booked')
-            await conn.execute('update public.calendar_jobs set prep_bays=$2,updated_at=now() where id=$1',payload.job_id,names)
-            await conn.execute('delete from public.calendar_job_bay_assignments where job_id=$1',payload.job_id)
-            for b in payload.bays:
-                if b.department: await conn.execute('insert into public.calendar_job_bay_assignments(job_id,bay,department) values($1,$2,$3)',payload.job_id,b.bay,b.department)
+            if any((await conflicts(p.prep_date,p.ship_date,names,conn=conn)).values()):
+                raise HTTPException(409,'One or more prep bays have already been booked')
+            job=await conn.fetchrow("""insert into public.calendar_jobs(name,winhits_number,prep_date,ship_date,prep_bays,created_by,notes)
+                values($1,$2,$3,$4,$5,$6,$7) returning id""",p.name.strip(),p.winhits_number.strip(),p.prep_date,p.ship_date,names,user['id'],p.notes)
+            await store_assignments(conn,job['id'],p.bays)
+            return {'ok':True,'job_id':str(job['id'])}
     finally: await conn.close()
+
+@app.patch('/api/prep-bays/booking/{job_id}')
+async def edit_direct_booking(job_id:UUID,p:JobBooking,user=Depends(editor)):
+    names=validate_booking(p)
+    conn=await db()
+    try:
+        async with conn.transaction():
+            await conn.execute('select pg_advisory_xact_lock(4172314)')
+            job=await conn.fetchrow('select id from public.calendar_jobs where id=$1 for update',job_id)
+            if not job: raise HTTPException(404,'Booking not found')
+            if any((await conflicts(p.prep_date,p.ship_date,names,exclude_job=job_id,conn=conn)).values()):
+                raise HTTPException(409,'One or more prep bays have already been booked')
+            await conn.execute("""update public.calendar_jobs set name=$2,winhits_number=$3,prep_date=$4,ship_date=$5,prep_bays=$6,notes=$7,updated_at=now() where id=$1""",job_id,p.name.strip(),p.winhits_number.strip(),p.prep_date,p.ship_date,names,p.notes)
+            await store_assignments(conn,job_id,p.bays)
+    finally: await conn.close()
+    return {'ok':True}
+
+@app.get('/api/prep-bays/requests')
+async def list_requests(user=Depends(calendar_user)):
+    if user['role'] not in ('project_manager','operations_manager','admin'): raise HTTPException(403,'Request access required')
+    if user['role']=='project_manager':
+        rows=await query('select * from public.calendar_booking_requests where requester_id=$1 order by updated_at desc limit 500',user['id'])
+    else:
+        rows=await query("select * from public.calendar_booking_requests order by (status='pending') desc,updated_at desc limit 500")
+    result=[]
+    for r in rows:
+        d=dict(r)
+        if isinstance(d.get('bays'),str): d['bays']=json.loads(d['bays'])
+        for k in ('id','requester_id','job_id','reviewer_id'):
+            if d.get(k): d[k]=str(d[k])
+        for k in ('prep_date','ship_date','created_at','updated_at','reviewed_at'):
+            if d.get(k): d[k]=d[k].isoformat()
+        result.append(d)
+    return result
+
+@app.post('/api/prep-bays/requests',status_code=201)
+async def submit_request(p:JobBooking,user=Depends(calendar_user)):
+    if user['role']!='project_manager': raise HTTPException(403,'Project Manager access required')
+    names=validate_booking(p)
+    conn=await db()
+    try:
+        async with conn.transaction():
+            r=await conn.fetchrow("""insert into public.calendar_booking_requests(requester_id,name,winhits_number,prep_date,ship_date,bays,notes,status)
+                values($1,$2,$3,$4,$5,$6,$7,'pending') returning id""",user['id'],p.name.strip(),p.winhits_number.strip(),p.prep_date,p.ship_date,json.dumps([b.model_dump() for b in p.bays]),p.notes)
+            await notify_ops(conn,'request_submitted',f'New bay request: {p.name.strip()}',r['id'])
+            return {'ok':True,'id':str(r['id'])}
+    finally: await conn.close()
+
+@app.put('/api/prep-bays/requests/{request_id}')
+async def revise_request(request_id:UUID,p:JobBooking,user=Depends(calendar_user)):
+    if user['role']!='project_manager': raise HTTPException(403,'Project Manager access required')
+    validate_booking(p)
+    conn=await db()
+    try:
+        async with conn.transaction():
+            r=await conn.fetchrow('select * from public.calendar_booking_requests where id=$1 for update',request_id)
+            if not r: raise HTTPException(404,'Request not found')
+            if r['requester_id']!=user['id']: raise HTTPException(403,'You can only edit your own requests')
+            await conn.execute("""update public.calendar_booking_requests set name=$2,winhits_number=$3,prep_date=$4,ship_date=$5,bays=$6,notes=$7,
+                status='pending',rejection_reason=null,reviewer_id=null,reviewed_at=null,updated_at=now() where id=$1""",request_id,p.name.strip(),p.winhits_number.strip(),p.prep_date,p.ship_date,json.dumps([b.model_dump() for b in p.bays]),p.notes)
+            await notify_ops(conn,'request_resubmitted',f'Request updated: {p.name.strip()}',request_id)
+    finally: await conn.close()
+    return {'ok':True}
+
+class Decision(BaseModel):
+    decision: str
+    rejection_reason: Optional[str] = Field(default=None,max_length=2000)
+
+@app.post('/api/prep-bays/requests/{request_id}/decision')
+async def decide_request(request_id:UUID,p:Decision,user=Depends(editor)):
+    if p.decision not in ('approved','rejected'): raise HTTPException(422,'Invalid decision')
+    if p.decision=='rejected' and not (p.rejection_reason or '').strip(): raise HTTPException(422,'Rejection reason is required')
+    conn=await db()
+    try:
+        async with conn.transaction():
+            await conn.execute('select pg_advisory_xact_lock(4172314)')
+            r=await conn.fetchrow('select * from public.calendar_booking_requests where id=$1 for update',request_id)
+            if not r: raise HTTPException(404,'Request not found')
+            if r['status']!='pending': raise HTTPException(409,'Request is no longer pending')
+            if p.decision=='approved':
+                bays=[Bay(**b) for b in (json.loads(r['bays']) if isinstance(r['bays'],str) else r['bays'])]
+                names=[b.bay for b in bays]
+                if any((await conflicts(r['prep_date'],r['ship_date'],names,exclude_job=r['job_id'],conn=conn)).values()):
+                    raise HTTPException(409,'Bays are no longer available; reject or ask the PM to revise')
+                if r['job_id']:
+                    await conn.execute("""update public.calendar_jobs set name=$2,winhits_number=$3,prep_date=$4,ship_date=$5,prep_bays=$6,notes=$7,updated_at=now() where id=$1""",r['job_id'],r['name'],r['winhits_number'],r['prep_date'],r['ship_date'],names,r['notes'])
+                    job_id=r['job_id']
+                else:
+                    j=await conn.fetchrow("""insert into public.calendar_jobs(name,winhits_number,prep_date,ship_date,prep_bays,created_by,notes)
+                        values($1,$2,$3,$4,$5,$6,$7) returning id""",r['name'],r['winhits_number'],r['prep_date'],r['ship_date'],names,r['requester_id'],r['notes'])
+                    job_id=j['id']
+                await store_assignments(conn,job_id,bays)
+                await conn.execute('update public.calendar_booking_requests set job_id=$2 where id=$1',request_id,job_id)
+            await conn.execute("""update public.calendar_booking_requests set status=$2,rejection_reason=$3,reviewer_id=$4,reviewed_at=now(),updated_at=now() where id=$1""",request_id,p.decision,(p.rejection_reason or '').strip() if p.decision=='rejected' else None,user['id'])
+            await notify(conn,r['requester_id'],'request_'+p.decision,f'{r["name"]}: {p.decision}'+(f' — {p.rejection_reason.strip()}' if p.decision=='rejected' else ''),request_id)
+    finally: await conn.close()
+    return {'ok':True}
+
+@app.get('/api/prep-bays/notifications')
+async def notifications(user=Depends(calendar_user)):
+    rows=await query('select id,kind,message,request_id,created_at from public.calendar_notifications where user_id=$1 and read_at is null order by created_at desc limit 100',user['id'])
+    return [{'id':str(r['id']),'kind':r['kind'],'message':r['message'],'request_id':str(r['request_id']) if r['request_id'] else None,'created_at':r['created_at'].isoformat()} for r in rows]
+
+@app.post('/api/prep-bays/notifications/{notification_id}/read')
+async def read_notification(notification_id:UUID,user=Depends(calendar_user)):
+    await query('update public.calendar_notifications set read_at=now() where id=$1 and user_id=$2',notification_id,user['id'],execute=True)
     return {'ok':True}
 
 class ManualCreate(BaseModel):
@@ -203,21 +312,29 @@ def validate_manual(bays,label,dept,start,end):
 @app.post('/api/prep-bays/manual-booking')
 async def manual_create(p:ManualCreate,user=Depends(editor)):
     validate_manual(p.bays,p.label,p.department,p.start_date,p.end_date)
-    found=await conflicts(p.start_date,p.end_date,p.bays)
-    if any(found.values()): raise HTTPException(409,'One or more prep bays are already booked')
-    ids=[]
-    for bay in p.bays:
-        r=await query('insert into public.calendar_manual_bookings(bay,label,department,start_date,end_date,created_by_name) values($1,$2,$3,$4,$5,$6) returning id',bay,p.label.strip(),p.department,p.start_date,p.end_date,user['email'],one=True)
-        ids.append(str(r['id']))
-    return {'ok':True,'ids':ids}
+    conn=await db()
+    try:
+        async with conn.transaction():
+            await conn.execute('select pg_advisory_xact_lock(4172314)')
+            if any((await conflicts(p.start_date,p.end_date,p.bays,conn=conn)).values()): raise HTTPException(409,'One or more prep bays are already booked')
+            ids=[]
+            for bay in p.bays:
+                r=await conn.fetchrow('insert into public.calendar_manual_bookings(bay,label,department,start_date,end_date,created_by_name) values($1,$2,$3,$4,$5,$6) returning id',bay,p.label.strip(),p.department,p.start_date,p.end_date,user['email'])
+                ids.append(str(r['id']))
+            return {'ok':True,'ids':ids}
+    finally: await conn.close()
 
 @app.patch('/api/prep-bays/manual-booking/{booking_id}')
 async def manual_edit(booking_id:UUID,p:ManualEdit,user=Depends(editor)):
     validate_manual([p.bay],p.label,p.department,p.start_date,p.end_date)
-    found=await conflicts(p.start_date,p.end_date,[p.bay],exclude_manual=booking_id)
-    if any(found.values()): raise HTTPException(409,'Prep bay already booked')
-    result=await query('update public.calendar_manual_bookings set bay=$2,label=$3,department=$4,start_date=$5,end_date=$6 where id=$1 returning id',booking_id,p.bay,p.label.strip(),p.department,p.start_date,p.end_date,one=True)
-    if not result: raise HTTPException(404,'Booking not found')
+    conn=await db()
+    try:
+        async with conn.transaction():
+            await conn.execute('select pg_advisory_xact_lock(4172314)')
+            if any((await conflicts(p.start_date,p.end_date,[p.bay],exclude_manual=booking_id,conn=conn)).values()): raise HTTPException(409,'Prep bay already booked')
+            r=await conn.fetchrow('update public.calendar_manual_bookings set bay=$2,label=$3,department=$4,start_date=$5,end_date=$6 where id=$1 returning id',booking_id,p.bay,p.label.strip(),p.department,p.start_date,p.end_date)
+            if not r: raise HTTPException(404,'Booking not found')
+    finally: await conn.close()
     return {'ok':True}
 
 @app.delete('/api/prep-bays/manual-booking/{booking_id}')
@@ -243,7 +360,7 @@ async def admin(user=Depends(calendar_user)):
     return user
 
 def check_role(role):
-    if role not in ('viewer', 'editor', 'admin'):
+    if role not in ('viewer', 'editor', 'project_manager', 'operations_manager', 'admin'):
         raise HTTPException(422, 'Invalid calendar role')
 
 async def supabase_admin(method, path, payload=None):

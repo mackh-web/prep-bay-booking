@@ -44,7 +44,8 @@ function isoDate(year, monthIndex, day) {
 
 export default function PrepBayCalendar() {
   const { user } = useAuth();
-  const canBookBays = ["editor", "admin"].includes(user?.role);
+  const canBookBays = ["project_manager", "operations_manager", "admin"].includes(user?.role);
+  const canManageDirect = ["operations_manager", "admin"].includes(user?.role);
   const today = useMemo(() => new Date(), []);
   const [year, setYear] = useState(today.getFullYear());
   const [monthIndex, setMonthIndex] = useState(today.getMonth()); // 0-based
@@ -53,6 +54,11 @@ export default function PrepBayCalendar() {
   const [showBooking, setShowBooking] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [editingBooking, setEditingBooking] = useState(null);
+  const [editJob, setEditJob] = useState(null);
+  const [showRequests, setShowRequests] = useState(false);
+  const [notifications, setNotifications] = useState([]);
+  const refreshNotifications = async () => { try { const r = await api.get("/prep-bays/notifications"); setNotifications(r.data); } catch {} };
+  useEffect(() => { if (canBookBays) refreshNotifications(); }, [canBookBays]);
 
   const daysCount = daysInMonth(year, monthIndex);
   const days = Array.from({ length: daysCount }, (_, i) => i + 1);
@@ -168,12 +174,13 @@ export default function PrepBayCalendar() {
             <div className="flex flex-wrap gap-2">
               <button onClick={() => setShowBooking(true)} data-testid="book-bays-btn"
                 className="h-9 px-3 rounded-btn bg-prg-red text-white text-xs font-bold uppercase tracking-widest inline-flex items-center gap-2">
-                Book Bays <Plus size={14} />
+                {canManageDirect ? "Book Bays" : "Request Bays"} <Plus size={14} />
               </button>
-              <button onClick={() => setShowManual(true)} data-testid="manual-booking-btn"
+              {canManageDirect && <button onClick={() => setShowManual(true)} data-testid="manual-booking-btn"
                 className="h-9 px-3 rounded-btn border border-border bg-secondary hover:border-prg-red text-xs font-bold uppercase tracking-widest inline-flex items-center gap-2">
                 <Wrench size={14} /> Manual Booking
-              </button>
+              </button>}
+              <button onClick={() => setShowRequests(true)} className="h-9 px-3 rounded-btn border border-border bg-secondary text-xs font-bold uppercase tracking-widest">{canManageDirect ? "Approvals / Requests" : "My Requests"}</button>
             </div>
           )}
           <div className="flex items-center gap-2">
@@ -316,6 +323,7 @@ export default function PrepBayCalendar() {
                     className="inline-flex items-center gap-2 text-xs bg-secondary border border-border rounded-btn px-2.5 h-8 hover:border-prg-red transition-colors">
                     <span className="font-semibold">{b.job_name}</span>
                     <span className="text-muted-foreground font-mono text-[10px]">{b.prep_date} → {b.ship_date}</span>
+                    {canManageDirect && <button className="text-prg-red underline" onClick={() => { setEditJob({...b, id:b.job_id,name:b.job_name}); setShowBooking(true); }}>Edit</button>}
                   </div>
                 ))}
               </div>
@@ -326,11 +334,14 @@ export default function PrepBayCalendar() {
 
       {showBooking && (
         <BookBaysModal
-          onClose={() => setShowBooking(false)}
-          onSaved={() => { setShowBooking(false); load(); }}
+          editing={editJob}
+          onClose={() => { setShowBooking(false); setEditJob(null); }}
+          onSaved={() => { setShowBooking(false); setEditJob(null); load(); refreshNotifications(); }}
         />
       )}
 
+      {showRequests && <RequestsPanel onClose={() => setShowRequests(false)} onRefresh={() => { load(); refreshNotifications(); }} onEdit={(r) => { setEditJob(r); setShowRequests(false); setShowBooking(true); }} />}
+      {canBookBays && notifications.length > 0 && <div className="fixed bottom-4 right-4 z-40 w-80 max-w-[90vw] bg-card border border-border shadow-xl rounded-xl p-3 space-y-2"><div className="font-bold text-sm">Notifications ({notifications.length})</div>{notifications.slice(0,4).map(n=><div key={n.id} className="text-xs border-t border-border pt-2"><div>{n.message}</div><button className="text-prg-red mt-1" onClick={async()=>{await api.post(`/prep-bays/notifications/${n.id}/read`);refreshNotifications();}}>Dismiss</button></div>)}<button className="text-xs underline" onClick={() => setShowRequests(true)}>View requests</button></div>}
       {showManual && (
         <ManualBookingModal
           onClose={() => setShowManual(false)}
@@ -349,179 +360,75 @@ export default function PrepBayCalendar() {
   );
 }
 
-/* ---------------- Book Bays modal (Admin / Ops Manager only) ---------------- */
-function BookBaysModal({ onClose, onSaved }) {
-  const [query, setQuery] = useState("");
-  const [allJobs, setAllJobs] = useState([]);
-  const [loadingJobs, setLoadingJobs] = useState(true);
-  const [job, setJob] = useState(null);
-  const [selection, setSelection] = useState({}); // { [bay]: department|null }
-  const [availability, setAvailability] = useState([]);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    (async () => {
-      setLoadingJobs(true);
-      try {
-        const { data } = await api.get("/jobs", { params: { scope: "all" } });
-        setAllJobs(data);
-      } catch { setAllJobs([]); }
-      finally { setLoadingJobs(false); }
-    })();
-  }, []);
-
-  const q = query.trim().toLowerCase();
-  const results = q
-    ? allJobs.filter((j) => j.name?.toLowerCase().includes(q) || j.winhits_number?.toLowerCase().includes(q))
-    : allJobs;
-
-  const pickJob = async (j) => {
-    setJob(j);
-    setQuery("");
-    setError("");
-    const initial = {};
-    for (const bay of j.prep_bays || []) initial[bay] = j.bay_departments?.[bay] || null;
-    setSelection(initial);
-    if (j.prep_date && j.ship_date) {
-      try {
-        const { data } = await api.get("/prep-bays/availability", {
-          params: { prep_date: j.prep_date, ship_date: j.ship_date, exclude_job_id: j.id },
-        });
-        setAvailability(data);
-      } catch { setAvailability([]); }
-    }
-  };
-
-  const toggleBay = (bay) => {
-    setSelection((s) => {
-      const next = { ...s };
-      if (bay in next) delete next[bay];
-      else next[bay] = null;
-      return next;
-    });
-  };
-
-  const setBayDept = (bay, dept) => {
-    setSelection((s) => ({ ...s, [bay]: dept || null }));
-  };
-
-  const save = async () => {
-    if (!job) return;
+/* Job details and bay selection are entered together. */
+function BookBaysModal({onClose,onSaved,editing}) {
+  const {user}=useAuth();
+  const pm=user?.role==='project_manager';
+  const [name,setName]=useState(editing?.name||'');
+  const [winhits,setWinhits]=useState(editing?.winhits_number||'');
+  const [prep,setPrep]=useState(editing?.prep_date||'');
+  const [ship,setShip]=useState(editing?.ship_date||'');
+  const [notes,setNotes]=useState(editing?.notes||'');
+  const [selection,setSelection]=useState(()=>{
+    const s={}; const entries=editing?.bays||[];
+    if(entries.length) entries.forEach(b=>s[b.bay]=b.department||'');
+    else (editing?.prep_bays||[]).forEach(b=>s[b]=editing?.bay_departments?.[b]||'');
+    return s;
+  });
+  const [availability,setAvailability]=useState([]);
+  const [error,setError]=useState('');const [saving,setSaving]=useState(false);
+  useEffect(()=>{let live=true;if(!prep||!ship||ship<prep){setAvailability([]);return;}
+    api.get('/prep-bays/availability',{params:{prep_date:prep,ship_date:ship,exclude_job_id:editing?.job_id||editing?.id||undefined}})
+      .then(r=>{if(live)setAvailability(r.data)}).catch(()=>{if(live)setAvailability([])});
+    return()=>{live=false};
+  },[prep,ship,editing?.id,editing?.job_id]);
+  async function save(e){e.preventDefault();setError('');if(!Object.keys(selection).length){setError('Select at least one bay');return;}
     setSaving(true);
-    setError("");
+    const payload={name,winhits_number:winhits,prep_date:prep,ship_date:ship,notes,bays:Object.entries(selection).map(([bay,department])=>({bay,department:department||null}))};
     try {
-      await api.post("/prep-bays/booking", {
-        job_id: job.id,
-        bays: Object.entries(selection).map(([bay, department]) => ({ bay, department })),
-      });
-      toast.success(`Bays updated for ${job.name}`);
+      if(pm){if(editing?.request_id||editing?.requester_id)await api.put(`/prep-bays/requests/${editing.request_id||editing.id}`,payload);
+        else await api.post('/prep-bays/requests',payload);
+        toast.success('Request sent for approval');}
+      else if(editing?.id) {await api.patch(`/prep-bays/booking/${editing.id}`,payload);toast.success('Booking updated');}
+      else {await api.post('/prep-bays/booking',payload);toast.success('Booking confirmed');}
       onSaved();
-    } catch (e) {
-      setError(formatErr(e?.response?.data?.detail) || e.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const availabilityFor = (bay) => availability.find((a) => a.bay === bay);
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in" data-testid="book-bays-modal">
-      <div className="w-full max-w-2xl bg-card border border-border rounded-modal p-6 space-y-4 animate-slide-up max-h-[90vh] overflow-y-auto scrollbar-slim">
-        <div className="flex items-start justify-between">
-          <div>
-            <div className="text-[10px] uppercase tracking-[0.3em] text-muted-foreground mb-1">Prep bays</div>
-            <h3 className="font-display font-black text-xl">Book Bays</h3>
-          </div>
-          <button onClick={onClose} data-testid="book-bays-close" className="p-2 rounded-btn hover:bg-secondary"><X size={16} /></button>
-        </div>
-
-        {!job ? (
-          <div className="relative">
-            <input
-              autoFocus
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search or browse jobs by name or WinHits number…"
-              data-testid="book-bays-job-search"
-              className="w-full h-10 px-3 rounded-input bg-background border border-border text-sm focus:outline-none focus:border-prg-red"
-            />
-            <div className="mt-2 max-h-64 overflow-y-auto scrollbar-slim rounded-input border border-border divide-y divide-border">
-              {loadingJobs && <div className="p-3 text-sm text-muted-foreground">Loading jobs…</div>}
-              {!loadingJobs && results.length === 0 && <div className="p-3 text-sm text-muted-foreground">No jobs found.</div>}
-              {!loadingJobs && results.map((r) => (
-                <button key={r.id} onClick={() => pickJob(r)} data-testid={`book-bays-job-result-${r.id}`}
-                  className="w-full text-left p-3 hover:bg-secondary text-sm">
-                  <div className="font-semibold">{r.name}</div>
-                  <div className="text-xs text-muted-foreground font-mono">{r.winhits_number} · {r.prep_date} → {r.ship_date}</div>
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            <div className="bg-background border border-border rounded-input p-3 flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="font-semibold truncate">{job.name}</div>
-                <div className="text-xs text-muted-foreground font-mono">{job.winhits_number} · {job.prep_date} → {job.ship_date}</div>
-              </div>
-              <button onClick={() => { setJob(null); setSelection({}); setAvailability([]); }} data-testid="book-bays-change-job"
-                className="text-xs text-muted-foreground hover:text-prg-red shrink-0">Change job</button>
-            </div>
-
-            <div>
-              <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">Bays</div>
-              <div className="space-y-2">
-                {PREP_BAYS.map((bay) => {
-                  const selected = bay in selection;
-                  const avail = availabilityFor(bay);
-                  const conflict = avail?.conflicts?.[0];
-                  const disabled = !selected && avail && !avail.available;
-                  return (
-                    <div key={bay} className={`flex items-center gap-2 rounded-btn border px-3 py-2 ${selected ? "border-prg-red bg-prg-red/5" : "border-border bg-background"}`}>
-                      <button
-                        type="button"
-                        onClick={() => !disabled && toggleBay(bay)}
-                        disabled={disabled}
-                        data-testid={`book-bays-toggle-${bay.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`}
-                        title={conflict ? `Booked by ${conflict.job_name} (${conflict.prep_date} → ${conflict.ship_date})` : bay}
-                        className={`flex-1 text-left text-sm font-semibold ${disabled ? "text-muted-foreground/50 line-through cursor-not-allowed" : ""}`}
-                      >
-                        {bay}
-                      </button>
-                      {selected && (
-                        <select
-                          value={selection[bay] || ""}
-                          onChange={(e) => setBayDept(bay, e.target.value)}
-                          data-testid={`book-bays-department-${bay.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`}
-                          className="h-8 px-2 rounded-btn bg-background border border-border text-xs"
-                        >
-                          <option value="">No department</option>
-                          {BAY_DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
-                        </select>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="text-[10px] text-muted-foreground mt-1">Strikethrough = already booked by another job during this prep/ship window.</div>
-            </div>
-
-            {error && <div className="text-sm text-red-400 border border-red-800 bg-red-500/10 rounded-input p-3">{error}</div>}
-
-            <div className="flex gap-2 pt-2">
-              <button onClick={save} disabled={saving} data-testid="book-bays-save"
-                className="h-9 px-4 rounded-btn bg-prg-red text-white text-xs font-bold uppercase tracking-widest disabled:opacity-60">
-                {saving ? "Saving…" : "Save booking"}
-              </button>
-              <button onClick={onClose} className="h-9 px-4 rounded-btn border border-border text-xs font-bold uppercase tracking-widest">Cancel</button>
-            </div>
-          </div>
-        )}
-      </div>
+    }catch(err){setError(formatErr(err?.response?.data?.detail)||err.message)}finally{setSaving(false)}
+  }
+  return <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"><form onSubmit={save} className="w-full max-w-2xl max-h-[92vh] overflow-y-auto bg-card border border-border rounded-xl p-6 space-y-4">
+    <div className="flex justify-between items-center"><h2 className="text-xl font-black">{editing?'Edit':'New'} {pm?'bay request':'bay booking'}</h2><button type="button" onClick={onClose}><X size={18}/></button></div>
+    <div className="grid sm:grid-cols-2 gap-3">
+      <label className="text-sm">Job name<input required maxLength={200} value={name} onChange={e=>setName(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded"/></label>
+      <label className="text-sm">WinHits number<input required maxLength={100} value={winhits} onChange={e=>setWinhits(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded"/></label>
+      <label className="text-sm">Prep date<input required type="date" value={prep} onChange={e=>setPrep(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded"/></label>
+      <label className="text-sm">Ship date<input required type="date" min={prep} value={ship} onChange={e=>setShip(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded"/></label>
     </div>
-  );
+    <label className="block text-sm">Notes / bay justification (optional)<textarea maxLength={3000} rows={3} value={notes} onChange={e=>setNotes(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded" placeholder="Why are these particular bays required?"/></label>
+    <div className="font-semibold text-sm">Select prep bays</div>
+    <div className="grid sm:grid-cols-2 gap-2">{PREP_BAYS.map(bay=>{
+      const selected=Object.hasOwn(selection,bay);const conflict=availability.find(x=>x.bay===bay)?.conflicts?.[0];
+      return <div key={bay} className="border border-border rounded p-2"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={selected} onChange={e=>setSelection(s=>{const n={...s};if(e.target.checked)n[bay]='';else delete n[bay];return n})}/>{bay}</label>
+        {conflict&&<div className="text-xs text-amber-400">Booked: {conflict.job_name}{pm?' (request may be rejected)':''}</div>}
+        {selected&&<select aria-label={`Department for ${bay}`} className="w-full mt-2 bg-secondary border border-border p-1 text-xs" value={selection[bay]} onChange={e=>setSelection(s=>({...s,[bay]:e.target.value}))}><option value="">No department</option>{BAY_DEPARTMENTS.map(d=><option key={d} value={d}>{d}</option>)}</select>}
+      </div>})}</div>
+    {pm&&<p className="text-xs text-muted-foreground">Requests do not reserve bays. Existing approved bookings remain unchanged until your revision is approved.</p>}
+    {error&&<p className="text-red-400 text-sm" role="alert">{error}</p>}
+    <div className="flex gap-3"><button disabled={saving} className="bg-prg-red text-white px-4 py-2 rounded disabled:opacity-50">{saving?'Saving…':pm?'Submit for approval':'Confirm booking'}</button><button type="button" onClick={onClose} className="border border-border rounded px-4 py-2">Cancel</button></div>
+  </form></div>
+}
+
+function RequestsPanel({onClose,onRefresh,onEdit}){
+  const {user}=useAuth();const ops=['operations_manager','admin'].includes(user?.role);
+  const [requests,setRequests]=useState([]),[error,setError]=useState(''),[busy,setBusy]=useState(false);
+  const load=async()=>{try{const r=await api.get('/prep-bays/requests');setRequests(r.data)}catch(e){setError(formatErr(e?.response?.data?.detail)||e.message)}};
+  useEffect(()=>{load()},[]);
+  async function decide(r,decision){let rejection_reason=null;if(decision==='rejected'){rejection_reason=window.prompt('Reason for rejection (required):');if(!rejection_reason?.trim())return;}
+    setBusy(true);setError('');try{await api.post(`/prep-bays/requests/${r.id}/decision`,{decision,rejection_reason});toast.success(`Request ${decision}`);await load();onRefresh()}catch(e){setError(formatErr(e?.response?.data?.detail)||e.message)}finally{setBusy(false)}}
+  return <div className="fixed inset-0 z-50 bg-black/80 overflow-y-auto p-4"><div className="max-w-3xl mx-auto bg-card border border-border rounded-xl p-6 space-y-4"><div className="flex justify-between"><h2 className="text-xl font-black">{ops?'Approval queue and requests':'My bay requests'}</h2><button onClick={onClose}><X size={18}/></button></div>
+    {error&&<p className="text-red-400 text-sm">{error}</p>}{!requests.length&&<p className="text-sm text-muted-foreground">No requests yet.</p>}
+    {requests.map(r=><div key={r.id} className="border border-border rounded p-4 space-y-2"><div className="flex justify-between gap-2"><div className="font-bold">{r.name} · {r.winhits_number}</div><span className="text-sm capitalize">{r.status}</span></div><div className="text-xs text-muted-foreground">{r.prep_date} → {r.ship_date} · {r.bays.map(b=>b.bay).join(', ')}</div>
+      {r.notes&&<div className="text-sm">Notes: {r.notes}</div>}{r.rejection_reason&&<div className="text-sm text-red-400">Rejection reason: {r.rejection_reason}</div>}
+      <div className="flex flex-wrap gap-2">{ops&&r.status==='pending'&&<><button disabled={busy} onClick={()=>decide(r,'approved')} className="bg-prg-red text-white rounded px-3 py-2 text-sm">Approve</button><button disabled={busy} onClick={()=>decide(r,'rejected')} className="border border-border rounded px-3 py-2 text-sm">Reject</button></>}{!ops&&<button className="border border-border rounded px-3 py-2 text-sm" onClick={()=>onEdit({...r,request_id:r.id})}>Edit / Resubmit</button>}</div>
+    </div>)}<button className="border border-border rounded px-3 py-2" onClick={onClose}>Close</button></div></div>
 }
 
 /* ---------------- Manual Booking modal (Admin / Ops Manager only) ----------------
