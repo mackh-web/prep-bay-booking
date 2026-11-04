@@ -7,7 +7,7 @@ from typing import Optional
 from uuid import UUID
 import asyncpg
 import httpx
-from fastapi import FastAPI, Request, Response, HTTPException, Depends
+from fastapi import FastAPI, Request, Response, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel, Field
 
 app = FastAPI()
@@ -235,7 +235,7 @@ async def change_job_metadata(job_id:UUID,p:JobMetadata,user=Depends(calendar_us
     return {'ok':True}
 
 @app.post('/api/jobs/{job_id}/change-request',status_code=201)
-async def request_job_bay_changes(job_id:UUID,p:JobBooking,user=Depends(calendar_user)):
+async def request_job_bay_changes(job_id:UUID,p:JobBooking,background_tasks:BackgroundTasks,user=Depends(calendar_user)):
     if user['role']!='project_manager':raise HTTPException(403,'Project Manager access required')
     names=validate_booking(p)
     conn=await db()
@@ -258,6 +258,7 @@ async def request_job_bay_changes(job_id:UUID,p:JobBooking,user=Depends(calendar
                 user['id'],job_id,current['name'],current['winhits_number'],p.prep_date,p.ship_date,
                 json.dumps([b.model_dump() for b in p.bays]),p.notes)
             await notify_ops(conn,'request_submitted',f'Bay/date change requested: {current["name"]}',r['id'])
+            background_tasks.add_task(send_request_push_notifications, r['id'])
             return {'ok':True,'id':str(r['id'])}
     finally:await conn.close()
 
@@ -316,6 +317,77 @@ async def notify(conn, recipient, kind, message, request_id):
 async def notify_ops(conn,kind,message,request_id):
     users=await conn.fetch("select user_id from public.calendar_users where enabled=true and role in ('operations_manager','admin')")
     for u in users: await notify(conn,u['user_id'],kind,message,request_id)
+
+# Browser push subscriptions are scoped to the signed-in calendar account.
+# A single user can register multiple devices independently.
+class PushSubscriptionBody(BaseModel):
+    endpoint: str = Field(min_length=12, max_length=4096)
+    keys: dict[str, str]
+
+@app.get('/api/push/config')
+async def push_config(user=Depends(calendar_user)):
+    public_key = os.getenv('VAPID_PUBLIC_KEY', '').strip()
+    return {'enabled': bool(public_key and os.getenv('VAPID_PRIVATE_KEY')), 'publicKey': public_key}
+
+@app.post('/api/push/subscriptions')
+async def save_push_subscription(body: PushSubscriptionBody, user=Depends(calendar_user)):
+    from urllib.parse import urlparse
+    parsed = urlparse(body.endpoint)
+    if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
+        raise HTTPException(422, 'A valid HTTPS push endpoint is required')
+    if not body.keys.get('p256dh') or not body.keys.get('auth'):
+        raise HTTPException(422, 'Push subscription keys are missing')
+    if not (os.getenv('VAPID_PUBLIC_KEY') and os.getenv('VAPID_PRIVATE_KEY')):
+        raise HTTPException(503, 'Push notifications have not been configured')
+    await query('''insert into public.calendar_push_subscriptions(user_id, endpoint, p256dh, auth)
+        values($1,$2,$3,$4) on conflict(endpoint) do update
+        set user_id=excluded.user_id, p256dh=excluded.p256dh, auth=excluded.auth, updated_at=now()''',
+        user['id'], body.endpoint, body.keys['p256dh'], body.keys['auth'], execute=True)
+    return {'ok': True}
+
+@app.delete('/api/push/subscriptions')
+async def remove_push_subscription(body: PushSubscriptionBody, user=Depends(calendar_user)):
+    await query('delete from public.calendar_push_subscriptions where endpoint=$1 and user_id=$2',
+                body.endpoint, user['id'], execute=True)
+    return {'ok': True}
+
+async def send_request_push_notifications(request_id: UUID):
+    # Best-effort delivery after commit; never block approvals.
+    private_key = os.getenv('VAPID_PRIVATE_KEY', '').strip()
+    subject = os.getenv('VAPID_SUBJECT', '').strip()
+    if not private_key or not subject:
+        return
+    try:
+        from pywebpush import webpush, WebPushException
+    except ImportError:
+        return
+    conn = await db()
+    try:
+        notifications = await conn.fetch('''select n.id,n.user_id,n.kind,n.message,n.request_id,
+            s.id as subscription_id,s.endpoint,s.p256dh,s.auth
+            from public.calendar_notifications n
+            join public.calendar_push_subscriptions s on s.user_id=n.user_id
+            where n.request_id=$1 and n.created_at >= now()-interval '5 minutes' ''', request_id)
+        for n in notifications:
+            claimed = await conn.fetchval('''insert into public.calendar_push_deliveries(notification_id,subscription_id)
+                values($1,$2) on conflict do nothing returning notification_id''', n['id'], n['subscription_id'])
+            if not claimed:
+                continue
+            payload = json.dumps({'title': 'PRG UK Prep Bay Calendar', 'body': n['message'],
+                'tag': str(n['id']), 'url': '/#/approvals' if n['kind'] in ('request_submitted','request_resubmitted') else '/#/'})
+            try:
+                await asyncio.to_thread(webpush,
+                    subscription_info={'endpoint': n['endpoint'], 'keys': {'p256dh': n['p256dh'], 'auth': n['auth']}},
+                    data=payload, vapid_private_key=private_key, vapid_claims={'sub': subject}, ttl=3600, timeout=8)
+            except WebPushException as exc:
+                if getattr(getattr(exc, 'response', None), 'status_code', None) in (404, 410):
+                    await conn.execute('delete from public.calendar_push_subscriptions where id=$1', n['subscription_id'])
+                else:
+                    await conn.execute('delete from public.calendar_push_deliveries where notification_id=$1 and subscription_id=$2', n['id'], n['subscription_id'])
+            except Exception:
+                await conn.execute('delete from public.calendar_push_deliveries where notification_id=$1 and subscription_id=$2', n['id'], n['subscription_id'])
+    finally:
+        await conn.close()
 
 @app.post('/api/prep-bays/booking',status_code=201)
 async def direct_booking(p:JobBooking,user=Depends(editor)):
@@ -404,7 +476,7 @@ async def restore_archived_request(request_id: UUID, user=Depends(editor)):
     return {'ok': True}
 
 @app.post('/api/prep-bays/requests',status_code=201)
-async def submit_request(p:JobBooking,user=Depends(calendar_user)):
+async def submit_request(p:JobBooking,background_tasks:BackgroundTasks,user=Depends(calendar_user)):
     if user['role']!='project_manager': raise HTTPException(403,'Project Manager access required')
     names=validate_booking(p)
     conn=await db()
@@ -416,11 +488,12 @@ async def submit_request(p:JobBooking,user=Depends(calendar_user)):
             r=await conn.fetchrow("""insert into public.calendar_booking_requests(requester_id,name,winhits_number,prep_date,ship_date,bays,notes,status)
                 values($1,$2,$3,$4,$5,$6,$7,'pending') returning id""",user['id'],p.name.strip(),p.winhits_number.strip(),p.prep_date,p.ship_date,json.dumps([b.model_dump() for b in p.bays]),p.notes)
             await notify_ops(conn,'request_submitted',f'New bay request: {p.name.strip()}',r['id'])
+            background_tasks.add_task(send_request_push_notifications, r['id'])
             return {'ok':True,'id':str(r['id'])}
     finally: await conn.close()
 
 @app.put('/api/prep-bays/requests/{request_id}')
-async def revise_request(request_id:UUID,p:JobBooking,user=Depends(calendar_user)):
+async def revise_request(request_id:UUID,p:JobBooking,background_tasks:BackgroundTasks,user=Depends(calendar_user)):
     if user['role']!='project_manager': raise HTTPException(403,'Project Manager access required')
     names=validate_booking(p)
     conn=await db()
@@ -436,6 +509,7 @@ async def revise_request(request_id:UUID,p:JobBooking,user=Depends(calendar_user
             await conn.execute("""update public.calendar_booking_requests set name=$2,winhits_number=$3,prep_date=$4,ship_date=$5,bays=$6,notes=$7,
                 status='pending',rejection_reason=null,reviewer_id=null,reviewed_at=null,updated_at=now() where id=$1""",request_id,p.name.strip(),p.winhits_number.strip(),p.prep_date,p.ship_date,json.dumps([b.model_dump() for b in p.bays]),p.notes)
             await notify_ops(conn,'request_resubmitted',f'Request updated: {p.name.strip()}',request_id)
+            background_tasks.add_task(send_request_push_notifications, request_id)
     finally: await conn.close()
     return {'ok':True}
 
@@ -444,7 +518,7 @@ class Decision(BaseModel):
     rejection_reason: Optional[str] = Field(default=None,max_length=2000)
 
 @app.post('/api/prep-bays/requests/{request_id}/decision')
-async def decide_request(request_id:UUID,p:Decision,user=Depends(editor)):
+async def decide_request(request_id:UUID,p:Decision,background_tasks:BackgroundTasks,user=Depends(editor)):
     if p.decision not in ('approved','rejected'): raise HTTPException(422,'Invalid decision')
     if p.decision=='rejected' and not (p.rejection_reason or '').strip(): raise HTTPException(422,'Rejection reason is required')
     conn=await db()
@@ -475,6 +549,7 @@ async def decide_request(request_id:UUID,p:Decision,user=Depends(editor)):
                 await conn.execute('update public.calendar_booking_requests set job_id=$2 where id=$1',request_id,job_id)
             await conn.execute("""update public.calendar_booking_requests set status=$2,rejection_reason=$3,reviewer_id=$4,reviewed_at=now(),updated_at=now() where id=$1""",request_id,p.decision,(p.rejection_reason or '').strip() if p.decision=='rejected' else None,user['id'])
             await notify(conn,r['requester_id'],'request_'+p.decision,f'{r["name"]}: {p.decision}'+(f' — {p.rejection_reason.strip()}' if p.decision=='rejected' else ''),request_id)
+            background_tasks.add_task(send_request_push_notifications, request_id)
     finally: await conn.close()
     return {'ok':True}
 
