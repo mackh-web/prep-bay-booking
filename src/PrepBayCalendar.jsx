@@ -197,8 +197,8 @@ export default function PrepBayCalendar({onOpenJob = (id) => { window.location.h
       <div className="flex flex-col gap-4">
         <div>
           <div className="text-[10px] uppercase tracking-[0.3em] text-muted-foreground mb-1">Prep bays</div>
-          <h1 className="font-display font-black text-2xl leading-tight sm:text-3xl">Bay booking calendar</h1>
-          <p className="text-muted-foreground text-sm mt-1">Live view of every job that occupies a prep bay this month. Colour reflects department.</p>
+          <h1 className="font-display font-black text-xl leading-tight sm:text-3xl">Bay booking calendar</h1>
+          <p className="text-muted-foreground text-xs sm:text-sm mt-1">Live view of every job that occupies a prep bay this month. Colour reflects department.</p>
         </div>
         <div className="flex flex-col gap-3 w-full">
           {canBookBays && (
@@ -211,7 +211,7 @@ export default function PrepBayCalendar({onOpenJob = (id) => { window.location.h
                 className="min-h-11 px-3 rounded-btn justify-center bg-secondary border border-border hover:border-prg-red text-xs font-bold uppercase tracking-widest inline-flex items-center gap-2">
                 <Wrench size={14} /> Manual Booking
               </button>}
-              {!canManageDirect && <button onClick={() => setShowRequests(true)} className="min-h-11 px-3 rounded-btn border border-border bg-secondary text-xs font-bold uppercase tracking-widest">My Requests</button>}
+              {!canManageDirect && <button onClick={() => setShowRequests(true)} className="min-h-11 px-3 rounded-btn border border-border bg-secondary text-xs font-bold uppercase tracking-widest col-span-2 sm:col-span-1">My Requests</button>}
             </div>
           )}
           <div className="flex items-center justify-between sm:justify-start gap-2 w-full">
@@ -219,7 +219,7 @@ export default function PrepBayCalendar({onOpenJob = (id) => { window.location.h
               <CaretLeft size={16} weight="bold" />
             </button>
             <div className="flex-1 sm:flex-none min-w-0 sm:min-w-[180px] text-center">
-              <div className="font-display font-black text-lg sm:text-xl" data-testid="calendar-month-label">{MONTHS[monthIndex]} {year}</div>
+              <div className="font-display font-black text-base sm:text-xl" data-testid="calendar-month-label">{MONTHS[monthIndex]} {year}</div>
               <button onClick={jumpToday} data-testid="calendar-today" className="text-[10px] uppercase tracking-widest text-muted-foreground hover:text-prg-red">Jump to today</button>
             </div>
             <button onClick={next} data-testid="calendar-next" className="w-11 h-11 rounded-btn border border-border bg-secondary hover:border-prg-red flex items-center justify-center transition-colors shrink-0" aria-label="Next month">
@@ -386,7 +386,7 @@ export default function PrepBayCalendar({onOpenJob = (id) => { window.location.h
       )}
 
       {showRequests && !canManageDirect && <RequestsPanel onClose={() => setShowRequests(false)} onRefresh={() => { load(); refreshNotifications(); }} onEdit={(r) => { setEditJob(r); setShowRequests(false); setShowBooking(true); }} />}
-      {canBookBays && notifications.length > 0 && <div className="fixed bottom-4 right-4 z-40 w-80 max-w-[90vw] bg-card border border-border shadow-xl rounded-xl p-3 space-y-2"><div className="font-bold text-sm">Notifications ({notifications.length})</div>{notifications.slice(0,4).map(n=><div key={n.id} className="text-xs border-t border-border pt-2"><div>{n.message}</div><button className="text-prg-red mt-1" onClick={async()=>{await api.post(`/prep-bays/notifications/${n.id}/read`);refreshNotifications();}}>Dismiss</button></div>)}<button className="text-xs underline" onClick={() => canManageDirect ? onOpenApprovals() : setShowRequests(true)}>View requests</button></div>}
+      {/* Notifications are shown in the header bell; avoid a duplicate floating overlay on mobile. */}
       {showManual && (
         <ManualBookingModal
           onClose={() => setShowManual(false)}
