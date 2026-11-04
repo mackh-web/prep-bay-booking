@@ -42,7 +42,7 @@ export default function ApprovalsPage({onBack}) {
     finally{setLoading(false);}
   },[]);
   useEffect(()=>{if(authorised)load();else setLoading(false);},[authorised,load]);
-  const counts=useMemo(()=>({pending:requests.filter(r=>r.status==='pending').length,approved:requests.filter(r=>r.status==='approved'&&!r.archived_at).length,archived:requests.filter(r=>!!r.archived_at).length,rejected:requests.filter(r=>r.status==='rejected').length}),[requests]);
+  const counts=useMemo(()=>({pending:requests.filter(r=>r.status==='pending').length,approved:requests.filter(r=>r.status==='approved'&&!r.archived_at).length,archived:requests.filter(r=>!!r.archived_at).length,rejected:requests.filter(r=>r.status==='rejected'&&!r.archived_at).length}),[requests]);
   const visible=useMemo(()=>requests.filter(r=>filter==='archived'?!!r.archived_at:!r.archived_at&&(filter==='all'||r.status===filter)).sort((a,b)=>String(b.created_at||'').localeCompare(String(a.created_at||''))),[requests,filter]);
   async function decide(request,decision){
     if(busyId)return;
@@ -64,7 +64,7 @@ export default function ApprovalsPage({onBack}) {
   }
   async function setArchive(request, archive){
     if(busyId)return;
-    if(archive&&!window.confirm(`Archive approved request for ${request.name || request.winhits_number}? This keeps the booking and approval history.`))return;
+    if(archive&&!window.confirm(`Archive ${request.status} request for ${request.name || request.winhits_number}? This keeps the request history until automatic deletion after 30 days.`))return;
     setBusyId(request.id);setError('');
     try{
       await api.post(`/prep-bays/requests/${request.id}/${archive?'archive':'restore'}`);
@@ -86,10 +86,10 @@ export default function ApprovalsPage({onBack}) {
     {loading?<p className="text-muted-foreground">Loading requests…</p>:visible.length===0?<div className="border border-border rounded-xl p-6 text-sm text-muted-foreground">No {filter==='all'?'':filter} requests to display.</div>:<div className="space-y-3">{visible.map(r=><article key={r.id} className="bg-card border border-border rounded-xl p-4 sm:p-5 space-y-3">
       <div className="flex flex-wrap justify-between items-start gap-2"><div className="min-w-0"><h2 className="font-bold text-lg break-words">{r.name||'Unnamed job'}</h2><p className="text-sm text-muted-foreground">WinHits: {r.winhits_number||'—'}</p></div><span className="capitalize border border-border rounded px-3 py-1 text-xs">{label(r.status)}</span></div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm"><div><div className="text-xs text-muted-foreground">Requested dates</div><div>{ukDate(r.prep_date)} → {ukDate(r.ship_date)}</div></div><div><div className="text-xs text-muted-foreground">Requested bays / departments</div><div>{Array.isArray(r.bays)&&r.bays.length?r.bays.map(b=>typeof b==='string'?b:`${b.bay}${b.department?' ('+b.department+')':''}`).join(', '):'—'}</div></div></div>
-      {r.archived_at&&(()=>{const info=archiveDeletionInfo(r.archived_at,nowMs);return <div className="rounded-lg border border-border bg-secondary p-3 text-sm" role="status">{info?<><div className="font-semibold">{info.due?'Scheduled for deletion':`${info.days} ${info.days===1?'day':'days'} until automatic deletion`}</div><div className="text-xs text-muted-foreground mt-1">Scheduled cleanup: {info.deletionDate} at 03:00 UTC · Approved request history only; the calendar booking remains.</div></>:<div className="text-muted-foreground">Deletion countdown unavailable: missing archive date.</div>}</div>;})()}
+      {r.archived_at&&(()=>{const info=archiveDeletionInfo(r.archived_at,nowMs);return <div className="rounded-lg border border-border bg-secondary p-3 text-sm" role="status">{info?<><div className="font-semibold">{info.due?'Scheduled for deletion':`${info.days} ${info.days===1?'day':'days'} until automatic deletion`}</div><div className="text-xs text-muted-foreground mt-1">Scheduled cleanup: {info.deletionDate} at 03:00 UTC · Archived request history only; calendar bookings remain.</div></>:<div className="text-muted-foreground">Deletion countdown unavailable: missing archive date.</div>}</div>;})()}
       {r.notes&&<div className="rounded bg-secondary p-3 text-sm whitespace-pre-wrap"><span className="text-muted-foreground">Project Manager notes: </span>{r.notes}</div>}
       {r.rejection_reason&&<div className="rounded border border-red-800/60 p-3 text-sm text-red-300 whitespace-pre-wrap">Rejection reason: {r.rejection_reason}</div>}
-      {r.status==='approved'&&<div className="flex flex-wrap gap-2 pt-1"><button type="button" disabled={!!busyId} onClick={()=>setArchive(r,!r.archived_at)} className="border border-border rounded px-4 py-2 text-sm disabled:opacity-50">{busyId===r.id?'Processing…':r.archived_at?'Restore request':'Archive request'}</button></div>}
+      {['approved','rejected'].includes(r.status)&&<div className="flex flex-wrap gap-2 pt-1"><button type="button" disabled={!!busyId} onClick={()=>setArchive(r,!r.archived_at)} className="border border-border rounded px-4 py-2 text-sm disabled:opacity-50">{busyId===r.id?'Processing…':r.archived_at?'Restore request':'Archive request'}</button></div>}
       {r.status==='pending'&&<div className="flex flex-wrap gap-2 pt-1"><button type="button" disabled={!!busyId} onClick={()=>decide(r,'approved')} className="bg-[#D11047] text-white rounded px-4 py-2 text-sm font-semibold disabled:opacity-50">{busyId===r.id?'Processing…':'Approve'}</button><button type="button" disabled={!!busyId} onClick={()=>decide(r,'rejected')} className="border border-border rounded px-4 py-2 text-sm disabled:opacity-50">Reject</button></div>}
     </article>)}</div>}
   </main>;

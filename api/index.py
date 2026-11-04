@@ -532,7 +532,7 @@ async def list_requests(user=Depends(calendar_user)):
     return result
 
 @app.post('/api/prep-bays/requests/{request_id}/archive')
-async def archive_approved_request(request_id: UUID, user=Depends(editor)):
+async def archive_completed_request(request_id: UUID, user=Depends(editor)):
     """Hide a completed approval from the active queue without deleting its audit history."""
     conn = await db()
     try:
@@ -540,8 +540,8 @@ async def archive_approved_request(request_id: UUID, user=Depends(editor)):
             row = await conn.fetchrow('select status, archived_at from public.calendar_booking_requests where id=$1 for update', request_id)
             if not row:
                 raise HTTPException(404, 'Request not found')
-            if row['status'] != 'approved':
-                raise HTTPException(409, 'Only approved requests may be archived')
+            if row['status'] not in ('approved', 'rejected'):
+                raise HTTPException(409, 'Only approved or rejected requests may be archived')
             if row['archived_at'] is not None:
                 return {'ok': True, 'already_archived': True}
             await conn.execute('update public.calendar_booking_requests set archived_at=now(), archived_by=$2 where id=$1', request_id, user['id'])
@@ -551,15 +551,15 @@ async def archive_approved_request(request_id: UUID, user=Depends(editor)):
 
 @app.post('/api/prep-bays/requests/{request_id}/restore')
 async def restore_archived_request(request_id: UUID, user=Depends(editor)):
-    """Restore an archived approval to the approved request history."""
+    """Restore an archived approved or rejected request to active history."""
     conn = await db()
     try:
         async with conn.transaction():
             row = await conn.fetchrow('select status, archived_at from public.calendar_booking_requests where id=$1 for update', request_id)
             if not row:
                 raise HTTPException(404, 'Request not found')
-            if row['status'] != 'approved' or row['archived_at'] is None:
-                raise HTTPException(409, 'Request is not an archived approval')
+            if row['status'] not in ('approved', 'rejected') or row['archived_at'] is None:
+                raise HTTPException(409, 'Request is not an archived approved or rejected request')
             await conn.execute('update public.calendar_booking_requests set archived_at=null, archived_by=null where id=$1', request_id)
     finally:
         await conn.close()
