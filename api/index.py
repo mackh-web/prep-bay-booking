@@ -374,7 +374,7 @@ async def send_request_push_notifications(request_id: UUID):
             if not claimed:
                 continue
             payload = json.dumps({'title': 'PRG UK Prep Bay Calendar', 'body': n['message'],
-                'tag': str(n['id']), 'url': '/#/approvals' if n['kind'] in ('request_submitted','request_resubmitted') else '/#/'})
+                'tag': str(n['id']), 'url': '/#/approvals' if n['kind'] in ('request_submitted','request_resubmitted','approval_reminder','change_requested') else '/#/'})
             try:
                 await asyncio.to_thread(webpush,
                     subscription_info={'endpoint': n['endpoint'], 'keys': {'p256dh': n['p256dh'], 'auth': n['auth']}},
@@ -388,6 +388,35 @@ async def send_request_push_notifications(request_id: UUID):
                 await conn.execute('delete from public.calendar_push_deliveries where notification_id=$1 and subscription_id=$2', n['id'], n['subscription_id'])
     finally:
         await conn.close()
+
+# Called by Vercel Cron once daily. CRON_SECRET is required to prevent public triggering.
+@app.get('/api/cron/pending-request-reminders')
+async def pending_request_reminders(request: Request, background_tasks: BackgroundTasks):
+    secret = os.getenv('CRON_SECRET', '')
+    import secrets
+    if not secret or not secrets.compare_digest(request.headers.get('authorization', ''), 'Bearer ' + secret):
+        raise HTTPException(401, 'Unauthorized')
+    conn = await db()
+    ids = []
+    try:
+        async with conn.transaction():
+            # Lock each pending request and atomically claim its single reminder.
+            requests = await conn.fetch('''select id, name, winhits_number from public.calendar_booking_requests
+                where status='pending' and created_at <= now() - interval '24 hours'
+                order by created_at limit 100 for update skip locked''')
+            for r in requests:
+                claimed = await conn.fetchval('''insert into public.calendar_request_reminders(request_id)
+                    values($1) on conflict do nothing returning request_id''', r['id'])
+                if not claimed:
+                    continue
+                await notify_ops(conn, 'approval_reminder',
+                    f"Approval outstanding for more than 24 hours: {r['name']} ({r['winhits_number']})", r['id'])
+                ids.append(r['id'])
+    finally:
+        await conn.close()
+    for rid in ids:
+        background_tasks.add_task(send_request_push_notifications, rid)
+    return {'reminders_created': len(ids)}
 
 @app.post('/api/prep-bays/booking',status_code=201)
 async def direct_booking(p:JobBooking,user=Depends(editor)):
