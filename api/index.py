@@ -228,11 +228,12 @@ async def manual_delete(booking_id:UUID,user=Depends(editor)):
 
 # Calendar-only account management. Never expose the Supabase secret to the browser.
 class UserCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
     email: str = Field(min_length=3, max_length=254)
-    password: str = Field(min_length=12, max_length=128)
     role: str = 'viewer'
 
 class UserUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
     role: str
     enabled: bool = True
 
@@ -265,10 +266,10 @@ async def supabase_admin(method, path, payload=None):
 
 @app.get('/api/admin/users')
 async def list_calendar_users(user=Depends(admin)):
-    rows = await query("""select c.user_id,c.role,c.enabled,u.email,u.created_at
+    rows = await query("""select c.user_id,c.name,c.role,c.enabled,u.email,u.created_at
                           from public.calendar_users c join auth.users u on u.id=c.user_id
                           order by lower(u.email)""")
-    return [{'id': str(r['user_id']), 'email':r['email'], 'role':r['role'],
+    return [{'id': str(r['user_id']), 'email':r['email'], 'name':r['name'], 'role':r['role'],
              'enabled':r['enabled'], 'created_at':r['created_at'].isoformat()} for r in rows]
 
 @app.post('/api/admin/users', status_code=201)
@@ -277,15 +278,17 @@ async def create_calendar_user(body:UserCreate, user=Depends(admin)):
     email=body.email.strip().lower()
     if '@' not in email or not email.split('@')[-1].count('.'):
         raise HTTPException(422, 'Invalid email address')
-    # Create Auth user first, then its dedicated calendar permission row.
-    created = await supabase_admin('POST', 'users', {'email':email, 'password':body.password, 'email_confirm':True})
+    name = body.name.strip()
+    if not name: raise HTTPException(422, 'Name is required')
+    # The temporary password is set only on the server and must be changed at first login.
+    created = await supabase_admin('POST', 'users', {'email':email, 'password':'PrepBays1', 'email_confirm':True, 'user_metadata':{'name':name}})
     uid = UUID(created['id'])
     try:
-        await query('insert into public.calendar_users(user_id,role,enabled,must_change_password) values($1,$2,true,true)',uid,body.role,execute=True)
+        await query('insert into public.calendar_users(user_id,name,role,enabled,must_change_password) values($1,$2,$3,true,true)',uid,name,body.role,execute=True)
     except Exception:
         await supabase_admin('DELETE',f'users/{uid}')
         raise HTTPException(500,'Unable to save calendar permissions; user creation rolled back')
-    return {'id':str(uid),'email':email,'role':body.role,'enabled':True}
+    return {'id':str(uid),'name':name,'email':email,'role':body.role,'enabled':True}
 
 async def ensure_other_admin(target:UUID, new_role:Optional[str]=None, enabled:bool=True):
     row=await query('select role,enabled from public.calendar_users where user_id=$1',target,one=True)
@@ -301,7 +304,9 @@ async def update_calendar_user(target:UUID, body:UserUpdate, user=Depends(admin)
     if target == user['id'] and (body.role != 'admin' or not body.enabled):
         raise HTTPException(409,'You cannot remove your own administrator access')
     await ensure_other_admin(target,body.role,body.enabled)
-    await query('update public.calendar_users set role=$2,enabled=$3 where user_id=$1',target,body.role,body.enabled,execute=True)
+    name = body.name.strip()
+    if not name: raise HTTPException(422, 'Name is required')
+    await query('update public.calendar_users set name=$2,role=$3,enabled=$4 where user_id=$1',target,name,body.role,body.enabled,execute=True)
     return {'ok':True}
 
 @app.delete('/api/admin/users/{target}')
