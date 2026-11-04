@@ -232,6 +232,7 @@ export default function PrepBayCalendar({onOpenJob = (id) => { window.location.h
       {err && <div className="text-sm text-red-400 border border-red-800 bg-red-500/10 rounded-input p-3">{err}</div>}
       {!data && !err && <div className="text-muted-foreground text-sm">Loading calendar…</div>}
 
+      {data && <p className="text-xs text-muted-foreground sm:hidden" role="note">Swipe left or right across the calendar to view more dates.</p>}
       {data && (
         <div className="bg-card border border-border rounded-card overflow-hidden min-w-0">
           <div className="overflow-x-auto overscroll-x-contain scrollbar-slim touch-pan-x" role="region" aria-label="Prep bay calendar, scroll horizontally to view dates" tabIndex={0}>
@@ -459,7 +460,7 @@ function BookBaysModal({onClose,onSaved,editing}) {
       onSaved();
     }catch(err){setError(formatErr(err?.response?.data?.detail)||err.message)}finally{setSaving(false)}
   }
-  return <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"><form onSubmit={save} className="w-full max-w-2xl max-h-[92vh] overflow-y-auto bg-card border border-border rounded-xl p-4 sm:p-6 space-y-4">
+  return <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-2 sm:p-4"><form onSubmit={save} className="w-full max-w-2xl max-h-[calc(100dvh-1rem)] sm:max-h-[92vh] overflow-y-auto bg-card border border-border rounded-xl p-4 sm:p-6 space-y-4">
     <div className="flex justify-between items-center"><h2 className="text-xl font-black">{editing?'Edit':'New'} {pm?'bay request':'bay booking'}</h2><button type="button" onClick={onClose}><X size={18}/></button></div>
     <div className="grid sm:grid-cols-2 gap-3">
       <label className="text-sm">Job name<input required maxLength={200} value={name} onChange={e=>setName(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded"/></label>
