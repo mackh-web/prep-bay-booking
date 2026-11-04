@@ -8,6 +8,23 @@ const ukDate = value => {const m=String(value||'').match(/^(\d{4})-(\d{2})-(\d{2
 const errorText = e => formatErr(e?.response?.data?.detail) || e?.message || 'Request failed';
 const label = value => String(value||'').replaceAll('_',' ');
 
+// The database purges approved archived requests daily at 03:00 UTC,
+// on the first scheduled run after the 30-day retention period expires.
+const DAY_MS = 24 * 60 * 60 * 1000;
+function archiveDeletionInfo(archivedAt, nowMs) {
+  if (!archivedAt) return null;
+  const archivedMs = Date.parse(archivedAt);
+  if (!Number.isFinite(archivedMs)) return null;
+  const eligibleMs = archivedMs + 30 * DAY_MS;
+  const run = new Date(eligibleMs);
+  run.setUTCHours(3, 0, 0, 0);
+  if (run.getTime() < eligibleMs) run.setUTCDate(run.getUTCDate() + 1);
+  const days = Math.max(0, Math.ceil((run.getTime() - nowMs) / DAY_MS));
+  const deletionDate = new Intl.DateTimeFormat('en-GB', {day:'2-digit', month:'2-digit', year:'numeric', timeZone:'UTC'}).format(run);
+  return {days, deletionDate, due:run.getTime() <= nowMs};
+}
+
+
 export default function ApprovalsPage({onBack}) {
   const {user}=useAuth();
   const authorised=['operations_manager','admin'].includes(user?.role);
@@ -16,6 +33,8 @@ export default function ApprovalsPage({onBack}) {
   const [busyId,setBusyId]=useState(null);
   const [error,setError]=useState('');
   const [filter,setFilter]=useState('pending');
+  const [nowMs,setNowMs]=useState(()=>Date.now());
+  useEffect(()=>{const timer=setInterval(()=>setNowMs(Date.now()),60000);return ()=>clearInterval(timer);},[]);
   const load=useCallback(async()=>{
     setError('');
     try {const response=await api.get('/prep-bays/requests');setRequests(Array.isArray(response.data)?response.data:[]);}
@@ -67,6 +86,7 @@ export default function ApprovalsPage({onBack}) {
     {loading?<p className="text-muted-foreground">Loading requests…</p>:visible.length===0?<div className="border border-border rounded-xl p-6 text-sm text-muted-foreground">No {filter==='all'?'':filter} requests to display.</div>:<div className="space-y-3">{visible.map(r=><article key={r.id} className="bg-card border border-border rounded-xl p-4 sm:p-5 space-y-3">
       <div className="flex flex-wrap justify-between items-start gap-2"><div className="min-w-0"><h2 className="font-bold text-lg break-words">{r.name||'Unnamed job'}</h2><p className="text-sm text-muted-foreground">WinHits: {r.winhits_number||'—'}</p></div><span className="capitalize border border-border rounded px-3 py-1 text-xs">{label(r.status)}</span></div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm"><div><div className="text-xs text-muted-foreground">Requested dates</div><div>{ukDate(r.prep_date)} → {ukDate(r.ship_date)}</div></div><div><div className="text-xs text-muted-foreground">Requested bays / departments</div><div>{Array.isArray(r.bays)&&r.bays.length?r.bays.map(b=>typeof b==='string'?b:`${b.bay}${b.department?' ('+b.department+')':''}`).join(', '):'—'}</div></div></div>
+      {r.archived_at&&(()=>{const info=archiveDeletionInfo(r.archived_at,nowMs);return <div className="rounded-lg border border-border bg-secondary p-3 text-sm" role="status">{info?<><div className="font-semibold">{info.due?'Scheduled for deletion':`${info.days} ${info.days===1?'day':'days'} until automatic deletion`}</div><div className="text-xs text-muted-foreground mt-1">Scheduled cleanup: {info.deletionDate} at 03:00 UTC · Approved request history only; the calendar booking remains.</div></>:<div className="text-muted-foreground">Deletion countdown unavailable: missing archive date.</div>}</div>;})()}
       {r.notes&&<div className="rounded bg-secondary p-3 text-sm whitespace-pre-wrap"><span className="text-muted-foreground">Project Manager notes: </span>{r.notes}</div>}
       {r.rejection_reason&&<div className="rounded border border-red-800/60 p-3 text-sm text-red-300 whitespace-pre-wrap">Rejection reason: {r.rejection_reason}</div>}
       {r.status==='approved'&&<div className="flex flex-wrap gap-2 pt-1"><button type="button" disabled={!!busyId} onClick={()=>setArchive(r,!r.archived_at)} className="border border-border rounded px-4 py-2 text-sm disabled:opacity-50">{busyId===r.id?'Processing…':r.archived_at?'Restore request':'Archive request'}</button></div>}
