@@ -162,36 +162,36 @@ export default function PrepBayCalendar() {
   };
 
   return (
-    <div className="space-y-6 overflow-x-hidden" data-testid="prep-bay-calendar-page">
-      <div className="flex flex-wrap items-end justify-between gap-4">
+    <div className="space-y-4 sm:space-y-6 min-w-0" data-testid="prep-bay-calendar-page">
+      <div className="flex flex-col gap-4">
         <div>
           <div className="text-[10px] uppercase tracking-[0.3em] text-muted-foreground mb-1">Prep bays</div>
-          <h1 className="font-display font-black text-3xl">Bay booking calendar</h1>
+          <h1 className="font-display font-black text-2xl leading-tight sm:text-3xl">Bay booking calendar</h1>
           <p className="text-muted-foreground text-sm mt-1">Live view of every job that occupies a prep bay this month. Colour reflects department.</p>
         </div>
-        <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
+        <div className="flex flex-col gap-3 w-full">
           {canBookBays && (
-            <div className="flex flex-wrap gap-2">
+            <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2 w-full">
               <button onClick={() => setShowBooking(true)} data-testid="book-bays-btn"
-                className="h-9 px-3 rounded-btn bg-prg-red text-white text-xs font-bold uppercase tracking-widest inline-flex items-center gap-2">
+                className="min-h-11 px-3 rounded-btn justify-center col-span-2 sm:col-span-1 bg-prg-red text-white text-xs font-bold uppercase tracking-widest inline-flex items-center gap-2">
                 {canManageDirect ? "Book Bays" : "Request Bays"} <Plus size={14} />
               </button>
               {canManageDirect && <button onClick={() => setShowManual(true)} data-testid="manual-booking-btn"
-                className="h-9 px-3 rounded-btn border border-border bg-secondary hover:border-prg-red text-xs font-bold uppercase tracking-widest inline-flex items-center gap-2">
+                className="min-h-11 px-3 rounded-btn justify-center bg-secondary border border-border hover:border-prg-red text-xs font-bold uppercase tracking-widest inline-flex items-center gap-2">
                 <Wrench size={14} /> Manual Booking
               </button>}
-              <button onClick={() => setShowRequests(true)} className="h-9 px-3 rounded-btn border border-border bg-secondary text-xs font-bold uppercase tracking-widest">{canManageDirect ? "Approvals / Requests" : "My Requests"}</button>
+              <button onClick={() => setShowRequests(true)} className="min-h-11 px-3 rounded-btn border border-border bg-secondary text-xs font-bold uppercase tracking-widest">{canManageDirect ? "Approvals / Requests" : "My Requests"}</button>
             </div>
           )}
-          <div className="flex items-center gap-2">
-            <button onClick={prev} data-testid="calendar-prev" className="w-9 h-9 rounded-btn border border-border bg-secondary hover:border-prg-red flex items-center justify-center transition-colors shrink-0" aria-label="Previous month">
+          <div className="flex items-center justify-between sm:justify-start gap-2 w-full">
+            <button onClick={prev} data-testid="calendar-prev" className="w-11 h-11 rounded-btn border border-border bg-secondary hover:border-prg-red flex items-center justify-center transition-colors shrink-0" aria-label="Previous month">
               <CaretLeft size={16} weight="bold" />
             </button>
-            <div className="min-w-[140px] sm:min-w-[180px] text-center">
+            <div className="flex-1 sm:flex-none min-w-0 sm:min-w-[180px] text-center">
               <div className="font-display font-black text-lg sm:text-xl" data-testid="calendar-month-label">{MONTHS[monthIndex]} {year}</div>
               <button onClick={jumpToday} data-testid="calendar-today" className="text-[10px] uppercase tracking-widest text-muted-foreground hover:text-prg-red">Jump to today</button>
             </div>
-            <button onClick={next} data-testid="calendar-next" className="w-9 h-9 rounded-btn border border-border bg-secondary hover:border-prg-red flex items-center justify-center transition-colors shrink-0" aria-label="Next month">
+            <button onClick={next} data-testid="calendar-next" className="w-11 h-11 rounded-btn border border-border bg-secondary hover:border-prg-red flex items-center justify-center transition-colors shrink-0" aria-label="Next month">
               <CaretRight size={16} weight="bold" />
             </button>
           </div>
@@ -202,12 +202,12 @@ export default function PrepBayCalendar() {
       {!data && !err && <div className="text-muted-foreground text-sm">Loading calendar…</div>}
 
       {data && (
-        <div className="bg-card border border-border rounded-card overflow-hidden">
-          <div className="overflow-x-auto scrollbar-slim">
-            <div className="min-w-[1000px]">
+        <div className="bg-card border border-border rounded-card overflow-hidden min-w-0">
+          <div className="overflow-x-auto overscroll-x-contain scrollbar-slim touch-pan-x" role="region" aria-label="Prep bay calendar, scroll horizontally to view dates" tabIndex={0}>
+            <div className="min-w-[1120px]">
               {/* Header row: day numbers */}
-              <div className="grid" style={{ gridTemplateColumns: `160px repeat(${daysCount}, minmax(28px, 1fr))` }}>
-                <div className="px-3 py-2 text-[10px] uppercase tracking-widest text-muted-foreground bg-secondary border-b border-border">Bay</div>
+              <div className="grid" style={{ gridTemplateColumns: `160px repeat(${daysCount}, minmax(31px, 1fr))` }}>
+                <div className="px-3 py-2 text-[10px] uppercase tracking-widest text-muted-foreground bg-secondary border-b border-border sticky left-0 z-20">Bay</div>
                 {days.map((d) => {
                   const iso = isoDate(year, monthIndex, d);
                   const isToday = iso === todayIso;
@@ -222,7 +222,7 @@ export default function PrepBayCalendar() {
               </div>
               {/* Rows: one per bay */}
               {bays.map((bay, rowIdx) => (
-                <div key={bay} className="grid relative" style={{ gridTemplateColumns: `160px repeat(${daysCount}, minmax(28px, 1fr))` }} data-testid={`calendar-row-${bay.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`}>
+                <div key={bay} className="grid relative" style={{ gridTemplateColumns: `160px repeat(${daysCount}, minmax(31px, 1fr))` }} data-testid={`calendar-row-${bay.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`}>
                   <div className={`px-3 py-3 text-xs font-semibold border-b border-border sticky left-0 z-10 ${rowIdx % 2 === 0 ? "bg-card" : "bg-secondary"} truncate`}>{bay}</div>
                   {days.map((d) => {
                     const iso = isoDate(year, monthIndex, d);
@@ -414,7 +414,7 @@ function BookBaysModal({onClose,onSaved,editing}) {
       onSaved();
     }catch(err){setError(formatErr(err?.response?.data?.detail)||err.message)}finally{setSaving(false)}
   }
-  return <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"><form onSubmit={save} className="w-full max-w-2xl max-h-[92vh] overflow-y-auto bg-card border border-border rounded-xl p-6 space-y-4">
+  return <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"><form onSubmit={save} className="w-full max-w-2xl max-h-[92vh] overflow-y-auto bg-card border border-border rounded-xl p-4 sm:p-6 space-y-4">
     <div className="flex justify-between items-center"><h2 className="text-xl font-black">{editing?'Edit':'New'} {pm?'bay request':'bay booking'}</h2><button type="button" onClick={onClose}><X size={18}/></button></div>
     <div className="grid sm:grid-cols-2 gap-3">
       <label className="text-sm">Job name<input required maxLength={200} value={name} onChange={e=>setName(e.target.value)} className="block w-full mt-1 p-2 bg-secondary border border-border rounded"/></label>
@@ -449,7 +449,7 @@ function RequestsPanel({onClose,onRefresh,onEdit}){
   useEffect(()=>{load()},[]);
   async function decide(r,decision){let rejection_reason=null;if(decision==='rejected'){rejection_reason=window.prompt('Reason for rejection (required):');if(!rejection_reason?.trim())return;}
     setBusy(true);setError('');try{await api.post(`/prep-bays/requests/${r.id}/decision`,{decision,rejection_reason});toast.success(`Request ${decision}`);await load();onRefresh()}catch(e){setError(formatErr(e?.response?.data?.detail)||e.message)}finally{setBusy(false)}}
-  return <div className="fixed inset-0 z-50 bg-black/80 overflow-y-auto p-4"><div className="max-w-3xl mx-auto bg-card border border-border rounded-xl p-6 space-y-4"><div className="flex justify-between"><h2 className="text-xl font-black">{ops?'Approval queue and requests':'My bay requests'}</h2><button onClick={onClose}><X size={18}/></button></div>
+  return <div className="fixed inset-0 z-50 bg-black/80 overflow-y-auto p-4"><div className="max-w-3xl mx-auto bg-card border border-border rounded-xl p-4 sm:p-6 space-y-4"><div className="flex justify-between"><h2 className="text-xl font-black">{ops?'Approval queue and requests':'My bay requests'}</h2><button onClick={onClose}><X size={18}/></button></div>
     {error&&<p className="text-red-400 text-sm">{error}</p>}{!requests.length&&<p className="text-sm text-muted-foreground">No requests yet.</p>}
     {requests.map(r=><div key={r.id} className="border border-border rounded p-4 space-y-2"><div className="flex justify-between gap-2"><div className="font-bold">{r.name} · {r.winhits_number}</div><span className="text-sm capitalize">{r.status}</span></div><div className="text-xs text-muted-foreground">{r.prep_date} → {r.ship_date} · {r.bays.map(b=>b.bay).join(', ')}</div>
       {r.notes&&<div className="text-sm">Notes: {r.notes}</div>}{r.rejection_reason&&<div className="text-sm text-red-400">Rejection reason: {r.rejection_reason}</div>}
